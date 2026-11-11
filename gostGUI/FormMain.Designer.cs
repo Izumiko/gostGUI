@@ -65,8 +65,26 @@ namespace gostGUI
         private CardPanel _launchCard;
         private Panel _launchHeader;
         private Label _launchTitleLabel;
-        private Panel _slotPanel;
-        private Label _slotLabel;
+        private Panel _detailScroll;
+        private TableLayoutPanel _detailLayout;
+        private Label _programLabel;
+        private TableLayoutPanel _programRow;
+        private ThemedTextBox _programBox;
+        private FlatButton _programBrowseButton;
+        private Label _programHint;
+        private Label _argsLabel;
+        private ThemedTextBox _argsBox;
+        private Label _workDirLabel;
+        private TableLayoutPanel _workDirRow;
+        private ThemedTextBox _workDirBox;
+        private FlatButton _workDirBrowseButton;
+        private FlatButton _workDirFromProgramButton;
+        private Label _workDirHint;
+        private Label _envLabel;
+        private ThemedTextBox _envBox;
+        private Label _envHint;
+        private Panel _runAsAdminRow;
+        private ToggleSwitch _runAsAdminToggle;
         private Label _detailSummaryLabel;
         private TableLayoutPanel _launchButtonRow;
         private FlatButton _startButton;
@@ -77,7 +95,6 @@ namespace gostGUI
         private FlatButton _clearLogButton;
         private FlatButton _copyLogButton;
         private Panel _logHost;
-        private TextBox _logTemplate;
 
         // 托盘
         private NotifyIcon _notifyIcon;
@@ -88,6 +105,7 @@ namespace gostGUI
 
         // 资源
         private Timer _elapsedTimer;
+        private Timer _programHintTimer;
         private Font _baseFont;
         private Font _titleFont;
         private Font _sectionFont;
@@ -468,14 +486,15 @@ namespace gostGUI
                 BackColor = Palette.Light.Surface
             };
             _rightColumn.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            _rightColumn.RowStyles.Add(new RowStyle(SizeType.Percent, 56f));
-            _rightColumn.RowStyles.Add(new RowStyle(SizeType.Percent, 44f));
+            _rightColumn.RowStyles.Add(new RowStyle(SizeType.Percent, 64f));
+            _rightColumn.RowStyles.Add(new RowStyle(SizeType.Percent, 36f));
 
-            // 上：启动设置卡片（12b 在此填字段）
+            // 上：启动设置卡片（程序 / 参数 / 工作目录 / 环境变量 / 以管理员身份运行）
             _launchCard = new CardPanel
             {
                 Dock = DockStyle.Fill,
-                Margin = new Padding(0, 0, 0, Dip(8))
+                Margin = new Padding(0, 0, 0, Dip(8)),
+                Padding = new Padding(Dip(16), Dip(4), Dip(16), Dip(4))
             };
             _launchHeader = new Panel
             {
@@ -493,31 +512,227 @@ namespace gostGUI
             };
             _launchHeader.Controls.Add(_launchTitleLabel);
 
-            _slotPanel = new Panel
+            // 详情编辑器：表单宽度固定、整体放在 AutoScroll 面板里（1024×640 下纵向滚动而不是裁切）。
+            _detailScroll = new Panel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(Dip(10), Dip(10), Dip(10), Dip(10)),
+                AutoScroll = true,
+                Padding = new Padding(Dip(2), Dip(2), Dip(2), Dip(2)),
                 BackColor = Palette.Light.Surface
             };
-            _slotLabel = new Label
+
+            _detailLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 2,
+                RowCount = 8,
+                BackColor = Palette.Light.Surface,
+                Margin = new Padding(0)
+            };
+            _detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(82)));
+            _detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, Dip(32)));
+            _detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, Dip(18)));
+            _detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, Dip(64)));
+            _detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, Dip(32)));
+            _detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, Dip(18)));
+            _detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, Dip(64)));
+            _detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, Dip(18)));
+            _detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, Dip(26)));
+
+            // 程序
+            _programLabel = CreateDetailLabel("程序");
+            _programRow = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                Margin = new Padding(0, 0, 0, Dip(2)),
+                BackColor = Palette.Light.Surface
+            };
+            _programRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _programRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(76)));
+            _programRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            _programBox = new ThemedTextBox
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, Dip(6), 0)
+            };
+            _programBox.Inner.Font = _baseFont;
+            _programBox.Inner.TextChanged += ProgramBox_TextChanged;
+            _programBox.Inner.Leave += ProgramBox_Leave;
+            _programBox.Inner.KeyDown += ProgramBox_KeyDown;
+            AttachProgramDropTarget(_programBox);
+
+            _programBrowseButton = new FlatButton
+            {
+                Dock = DockStyle.Fill,
+                Text = "浏览…",
+                Variant = ButtonVariant.Secondary,
+                Font = _baseFont,
+                Margin = new Padding(0)
+            };
+            _programBrowseButton.Click += ProgramBrowseButton_Click;
+
+            _programRow.Controls.Add(_programBox, 0, 0);
+            _programRow.Controls.Add(_programBrowseButton, 1, 0);
+
+            _programHint = new Label
             {
                 Dock = DockStyle.Fill,
                 AutoSize = false,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Text = "（任务 12b 在此填充：程序 / 参数 / 工作目录 / 环境变量 / 以管理员身份运行）",
-                ForeColor = Palette.Light.TextMuted
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+                Font = _baseFont,
+                Text = string.Empty,
+                ForeColor = Palette.Light.TextMuted,
+                Margin = new Padding(0, 0, 0, Dip(2))
             };
-            _slotPanel.Controls.Add(_slotLabel);
 
+            _detailLayout.Controls.Add(_programLabel, 0, 0);
+            _detailLayout.Controls.Add(_programRow, 1, 0);
+            _detailLayout.Controls.Add(_programHint, 1, 1);
+
+            // 参数
+            _argsLabel = CreateDetailLabel("参数");
+            _argsBox = new ThemedTextBox
+            {
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                Margin = new Padding(0, 0, 0, Dip(4))
+            };
+            _argsBox.ScrollBars = ScrollBars.Vertical;
+            _argsBox.Inner.Font = _baseFont;
+            _argsBox.Inner.Leave += ArgsBox_Leave;
+            _detailLayout.Controls.Add(_argsLabel, 0, 2);
+            _detailLayout.Controls.Add(_argsBox, 1, 2);
+
+            // 工作目录
+            _workDirLabel = CreateDetailLabel("工作目录");
+            _workDirRow = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 1,
+                Margin = new Padding(0, 0, 0, Dip(2)),
+                BackColor = Palette.Light.Surface
+            };
+            _workDirRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _workDirRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(76)));
+            _workDirRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(100)));
+            _workDirRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            _workDirBox = new ThemedTextBox
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, Dip(6), 0)
+            };
+            _workDirBox.Inner.Font = _baseFont;
+            _workDirBox.Inner.Leave += WorkDirBox_Leave;
+
+            _workDirBrowseButton = new FlatButton
+            {
+                Dock = DockStyle.Fill,
+                Text = "浏览…",
+                Variant = ButtonVariant.Secondary,
+                Font = _baseFont,
+                Margin = new Padding(0, 0, Dip(6), 0)
+            };
+            _workDirBrowseButton.Click += WorkDirBrowseButton_Click;
+
+            _workDirFromProgramButton = new FlatButton
+            {
+                Dock = DockStyle.Fill,
+                Text = "取程序目录",
+                Variant = ButtonVariant.Secondary,
+                Font = _baseFont,
+                Margin = new Padding(0)
+            };
+            _workDirFromProgramButton.Click += WorkDirFromProgramButton_Click;
+
+            _workDirRow.Controls.Add(_workDirBox, 0, 0);
+            _workDirRow.Controls.Add(_workDirBrowseButton, 1, 0);
+            _workDirRow.Controls.Add(_workDirFromProgramButton, 2, 0);
+
+            _workDirHint = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = _baseFont,
+                Text = "留空表示使用本工具所在目录",
+                ForeColor = Palette.Light.TextMuted,
+                Margin = new Padding(0, 0, 0, Dip(2))
+            };
+
+            _detailLayout.Controls.Add(_workDirLabel, 0, 3);
+            _detailLayout.Controls.Add(_workDirRow, 1, 3);
+            _detailLayout.Controls.Add(_workDirHint, 1, 4);
+
+            // 环境变量
+            _envLabel = CreateDetailLabel("环境变量");
+            _envBox = new ThemedTextBox
+            {
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                Margin = new Padding(0, 0, 0, Dip(4))
+            };
+            _envBox.ScrollBars = ScrollBars.Vertical;
+            _envBox.Inner.Font = _baseFont;
+            _envBox.Inner.Leave += EnvBox_Leave;
+
+            _envHint = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = _baseFont,
+                Text = "每行一条 KEY=VALUE",
+                ForeColor = Palette.Light.TextMuted,
+                Margin = new Padding(0, 0, 0, Dip(2))
+            };
+
+            _detailLayout.Controls.Add(_envLabel, 0, 5);
+            _detailLayout.Controls.Add(_envBox, 1, 5);
+            _detailLayout.Controls.Add(_envHint, 1, 6);
+
+            // 以管理员身份运行
+            _runAsAdminRow = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Palette.Light.Surface,
+                Margin = new Padding(0, 0, 0, Dip(4))
+            };
+            _runAsAdminToggle = new ToggleSwitch
+            {
+                Text = "以管理员身份运行",
+                Dock = DockStyle.Left,
+                AutoSize = true,
+                Font = _baseFont
+            };
+            _runAsAdminToggle.CheckedChanged += RunAsAdminToggle_CheckedChanged;
+            _runAsAdminRow.Controls.Add(_runAsAdminToggle);
+            _detailLayout.Controls.Add(_runAsAdminRow, 1, 7);
+
+            _detailScroll.Controls.Add(_detailLayout);
+
+            // 选中项摘要放在卡片标题右侧：不占纵向空间，把高度全部留给字段与日志。
             _detailSummaryLabel = new Label
             {
-                Dock = DockStyle.Bottom,
-                Height = Dip(26),
+                Dock = DockStyle.Right,
+                Width = Dip(300),
                 AutoSize = false,
                 AutoEllipsis = true,
-                TextAlign = ContentAlignment.MiddleLeft,
+                TextAlign = ContentAlignment.MiddleRight,
+                ForeColor = Palette.Light.TextMuted,
+                Font = _baseFont,
+                Margin = new Padding(0),
                 Text = "当前没有选中的配置项。"
             };
+            _launchHeader.Controls.Add(_detailSummaryLabel);
 
             _launchButtonRow = new TableLayoutPanel
             {
@@ -554,12 +769,11 @@ namespace gostGUI
             _launchButtonRow.Controls.Add(_startButton, 1, 0);
             _launchButtonRow.Controls.Add(_stopButton, 2, 0);
 
-            _launchCard.Controls.Add(_slotPanel);
-            _launchCard.Controls.Add(_detailSummaryLabel);
+            _launchCard.Controls.Add(_detailScroll);
             _launchCard.Controls.Add(_launchButtonRow);
             _launchCard.Controls.Add(_launchHeader);
 
-            // 下：输出卡片（12b 在此放带颜色的日志控件）
+            // 下：输出卡片（每项一个主题化 RichTextBox，按 LogKind 着色）
             _outputCard = new CardPanel
             {
                 Dock = DockStyle.Fill,
@@ -606,19 +820,6 @@ namespace gostGUI
                 Dock = DockStyle.Fill,
                 BackColor = Palette.Light.LogBg
             };
-            _logTemplate = new TextBox
-            {
-                Multiline = true,
-                ReadOnly = true,
-                ScrollBars = ScrollBars.Vertical,
-                WordWrap = false,
-                BorderStyle = BorderStyle.None,
-                Visible = false,
-                Font = _monoFont,
-                BackColor = Palette.Light.LogBg,
-                ForeColor = Palette.Light.LogStdout
-            };
-            _logHost.Controls.Add(_logTemplate);
             _logHost.Resize += LogHost_Resize;
 
             _outputCard.Controls.Add(_logHost);
@@ -660,6 +861,13 @@ namespace gostGUI
             };
             _elapsedTimer.Tick += ElapsedTimer_Tick;
 
+            // 程序框解析提示的防抖：输入停顿 ~200ms 后再解析，避免每敲一个键都搜一遍 PATH。
+            _programHintTimer = new Timer(this.components)
+            {
+                Interval = 200
+            };
+            _programHintTimer.Tick += ProgramHintTimer_Tick;
+
             // ---------------- 窗体级事件 ----------------
             this.FormClosing += FormMain_FormClosing;
             this.FormClosed += FormMain_FormClosed;
@@ -671,6 +879,21 @@ namespace gostGUI
 
             this.ResumeLayout(false);
             this.PerformLayout();
+        }
+
+        /// <summary>详情编辑器的字段标签：左对齐、弱化色、固定列宽。</summary>
+        private Label CreateDetailLabel(string text)
+        {
+            return new Label
+            {
+                Text = text,
+                AutoSize = false,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = _baseFont,
+                ForeColor = Palette.Light.TextMuted,
+                Margin = new Padding(0, 0, ThemePaint.Scale(this, 8), 0)
+            };
         }
 
         /// <summary>左栏按钮行的统一外观（20% 等分格子里的扁平按钮）。</summary>

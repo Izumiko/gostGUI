@@ -5,18 +5,20 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using gostGUI.Shared;
 using Microsoft.Win32;
 
 namespace gostGUI
 {
     /// <summary>
-    /// 主窗口：代码搭建的两栏骨架（左：配置列表 + 操作按钮；右：启动设置槽位 + 输出槽位）。
+    /// 主窗口：左边配置列表与操作按钮，右边“启动设置”详情编辑器与主题化日志面板。
     /// <para>
-    /// Task 12a 只做骨架与 v1.8 行为全量对齐：详情编辑器字段和带颜色的日志控件由 12b 填进
-    /// <see cref="LaunchSlotPanel"/> 与 <see cref="LogHost"/> 这两个明确标注的槽位。
+    /// 两个右栏区域各自可独立工作：详情编辑器整组回填/逐字段保存，日志面板按项切换视图、
+    /// 批量着色排空（工作线程只入队）。
     /// </para>
     /// <para>
     /// R30 纪律：StartProcess / StopProcess 可能因中转 + UAC 阻塞数十秒，一律不落 UI 线程；
@@ -67,6 +69,19 @@ namespace gostGUI
         private int _leftExpandedColumnWidth;
         private int _collapsedColumnWidth;
         private ConfigItem _currentEditingItem;
+
+        /// <summary>详情编辑器当前回填/保存的目标项（null 表示没有选中项）。只在 UI 线程读写。</summary>
+        private ConfigItem _detailItem;
+
+        /// <summary>回填字段期间为 true：抑制 TextChanged/Leave/CheckedChanged 触发的保存。</summary>
+        private bool _detailLoading;
+
+        /// <summary>程序解析结果缓存：键 = 程序 + 有效环境签名 + 应用目录；主题切换/重复提交不再扫文件系统。</summary>
+        private string _programHintCacheKey;
+        private ResolvedProgram _programHintCacheResult;
+
+        /// <summary>最近一次已经提示过的环境变量解析警告，避免每次失焦重复刷同一条系统日志。</summary>
+        private string _lastEnvWarningSignature;
 
         /// <summary>正常的启动路径：从配置恢复上次运行状态，并显示窗口与托盘图标。</summary>
         public FormMain()
@@ -133,7 +148,7 @@ namespace gostGUI
             _configManager.ItemUpdated += OnConfigItemUpdated;
             _configManager.SaveFailed += OnConfigSaveFailed;
 
-            _logViewManager = new LogViewManager(_logHost, _logTemplate);
+            _logViewManager = new LogViewManager(_logHost, _monoFont, TryPostUi);
 
             _themeManager.Mode = _configManager.Theme;
             _themeManager.Changed += OnThemeChanged;
@@ -190,6 +205,8 @@ namespace gostGUI
                 UpdateDetailSummary();
                 _logViewManager?.ShowLogView(null);
             }
+
+            LoadDetailEditor(GetCurrentConfigItem());
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -291,19 +308,37 @@ namespace gostGUI
             _launchHeader.BackColor = palette.SurfaceAlt;
             _launchButtonRow.BackColor = palette.SurfaceAlt;
             _outputHeader.BackColor = palette.SurfaceAlt;
-            _slotPanel.BackColor = palette.Surface;
+            _detailScroll.BackColor = palette.Surface;
+            _detailLayout.BackColor = palette.Surface;
+            _programRow.BackColor = palette.Surface;
+            _workDirRow.BackColor = palette.Surface;
+            _runAsAdminRow.BackColor = palette.Surface;
             _bannerPanel.BackColor = palette.SurfaceAlt;
 
             _titleLabel.ForeColor = palette.TextPrimary;
             _listHeaderLabel.ForeColor = palette.TextPrimary;
             _launchTitleLabel.ForeColor = palette.TextPrimary;
             _outputTitleLabel.ForeColor = palette.TextPrimary;
-            _detailSummaryLabel.ForeColor = palette.TextPrimary;
-            _slotLabel.ForeColor = palette.TextMuted;
+            _detailSummaryLabel.ForeColor = palette.TextMuted;
+            _programLabel.ForeColor = palette.TextMuted;
+            _argsLabel.ForeColor = palette.TextMuted;
+            _workDirLabel.ForeColor = palette.TextMuted;
+            _envLabel.ForeColor = palette.TextMuted;
+            _workDirHint.ForeColor = palette.TextMuted;
+            _envHint.ForeColor = palette.TextMuted;
             _bannerLabel.ForeColor = palette.Danger;
 
             _logHost.BackColor = palette.LogBg;
-            ApplyLogViewColors(palette);
+            _logViewManager?.ApplyTheme(palette);
+            if (_detailItem == null)
+            {
+                _programHint.ForeColor = palette.TextMuted;
+            }
+            else
+            {
+                UpdateProgramHint();
+            }
+
             if (_renameBox != null)
             {
                 _renameBox.BackColor = palette.SurfaceAlt;
@@ -324,28 +359,6 @@ namespace gostGUI
 
             UpdateThemeSelector();
             ApplyPrivilegeBadge();
-        }
-
-        private void ApplyLogViewColors(Palette palette)
-        {
-            if (_logHost == null)
-            {
-                return;
-            }
-
-            _logTemplate.BackColor = palette.LogBg;
-            _logTemplate.ForeColor = palette.LogStdout;
-            foreach (Control child in _logHost.Controls)
-            {
-                var box = child as TextBox;
-                if (box == null || ReferenceEquals(box, _logTemplate))
-                {
-                    continue;
-                }
-
-                box.BackColor = palette.LogBg;
-                box.ForeColor = palette.LogStdout;
-            }
         }
 
         private void UpdateThemeSelector()
@@ -423,7 +436,7 @@ namespace gostGUI
             return _configList?.SelectedItem as ConfigItem;
         }
 
-        /// <summary>当前选中的配置项（12b 的详情编辑器会用它回填字段）。</summary>
+        /// <summary>当前选中的配置项（详情编辑器/日志面板都以它为准）。</summary>
         public ConfigItem SelectedItem => GetCurrentConfigItem();
 
         private IList<ConfigItem> SelectedItemAsList()
@@ -496,6 +509,92 @@ namespace gostGUI
         internal IList<ConfigItem> ListItemsForTest()
         {
             return ListItems();
+        }
+
+        // ---- Task 12b 自检缝：走与生产代码相同的回填 / 提交 / 解析路径 ----
+
+        internal void SetProgramFieldForTest(string program)
+        {
+            if (_programBox == null)
+            {
+                return;
+            }
+
+            _programHintTimer?.Stop();
+            _programBox.Text = program ?? string.Empty;
+            CommitProgramField();
+            UpdateProgramHint();
+        }
+
+        internal string ProgramHintTextForTest => _programHint == null ? string.Empty : _programHint.Text;
+
+        internal Color ProgramHintColorForTest => _programHint == null ? Color.Empty : _programHint.ForeColor;
+
+        internal string EnvFieldTextForTest => _envBox == null ? string.Empty : _envBox.Text;
+
+        internal string ProgramFieldTextForTest => _programBox == null ? string.Empty : _programBox.Text;
+
+        internal string ArgsFieldTextForTest => _argsBox == null ? string.Empty : _argsBox.Text;
+
+        internal string WorkDirFieldTextForTest => _workDirBox == null ? string.Empty : _workDirBox.Text;
+
+        internal bool RunAsAdminFieldForTest => _runAsAdminToggle != null && _runAsAdminToggle.Checked;
+
+        internal void SelectItemForTest(ConfigItem item)
+        {
+            SelectItem(item);
+        }
+
+        internal void CommitEnvFieldForTest()
+        {
+            CommitEnvField();
+        }
+
+        /// <summary>只改程序框文字、不提交（用于验证 200ms 防抖：提示不应同步刷新）。</summary>
+        internal void SetProgramTextOnlyForTest(string program)
+        {
+            if (_programBox == null)
+            {
+                return;
+            }
+
+            _programHintTimer?.Stop();
+            _programBox.Text = program ?? string.Empty;
+        }
+
+        /// <summary>触发一次防抖到期（模拟 200ms Timer Tick）。</summary>
+        internal void FireProgramHintDebounceForTest()
+        {
+            _programHintTimer?.Stop();
+            ProgramHintTimer_Tick(null, EventArgs.Empty);
+        }
+
+        internal void SetArgsTextForTest(string args)
+        {
+            if (_argsBox != null)
+            {
+                _argsBox.Text = args ?? string.Empty;
+            }
+        }
+
+        internal void SetEnvTextForTest(string env)
+        {
+            if (_envBox != null)
+            {
+                _envBox.Text = env ?? string.Empty;
+            }
+        }
+
+        /// <summary>走与真实窗口关闭完全相同的事件处理器（UserClosing → 提交 + 隐藏）。</summary>
+        internal void TriggerFormClosingForTest()
+        {
+            FormMain_FormClosing(this, new FormClosingEventArgs(CloseReason.UserClosing, false));
+        }
+
+        /// <summary>走与托盘“退出”完全相同的退出前提交路径（不真的 Application.Exit）。</summary>
+        internal void CommitPendingEditsForTest()
+        {
+            CommitPendingDetailEdits();
         }
 
         /// <summary>列表右侧的状态文本：运行时长 / 启动中 / 停止中 / 已停止。</summary>
@@ -585,11 +684,8 @@ namespace gostGUI
             }
             else
             {
-                string program = string.IsNullOrWhiteSpace(item.Program) ? "（未设置）" : item.Program.Trim();
-                string args = string.IsNullOrWhiteSpace(item.Args) ? "（空）" : item.Args.Trim().Replace('\r', ' ').Replace('\n', ' ');
                 string state = IsItemRunning(item) ? "运行中" : "已停止";
-                _detailSummaryLabel.Text =
-                    "已选配置：" + (item.Name ?? string.Empty) + "　程序：" + program + "　参数：" + args + "　状态：" + state;
+                _detailSummaryLabel.Text = "已选：" + (item.Name ?? string.Empty) + " · " + state;
             }
 
             UpdateActionButtons();
@@ -908,23 +1004,25 @@ namespace gostGUI
 
         private void OnProcessOutputReceived(ConfigItem item, LogKind kind, string data)
         {
-            // 12b 会按 LogKind 着色；当前 LogViewManager 仍是 v1.8 的纯文本实现。
-            AppendLog(item, data);
+            // LogViewManager 只入队：绝不在工作线程上碰 UI 控件。
+            _logViewManager?.AppendText(item, kind, data);
         }
 
         private void OnProcessStarted(ConfigItem item)
         {
-            if (item != null)
-            {
-                item.Enable = true;
-                _configManager?.UpdateItem(item);
-            }
-
             PostToUi(() =>
             {
                 if (item == null)
                 {
                     return;
+                }
+
+                // 进程事件可能来自管道/进程 IO 线程：Enable 与配置文件写入一律回到 UI 线程，
+                // 避免在后台线程上跑 ConfigurationManager 的整表保存。
+                if (!_isExiting)
+                {
+                    item.Enable = true;
+                    _configManager?.UpdateItem(item);
                 }
 
                 _starting.Remove(item);
@@ -947,17 +1045,17 @@ namespace gostGUI
 
         private void OnProcessExited(ConfigItem item, int exitCode)
         {
-            if (!_isExiting && item != null)
-            {
-                item.Enable = false;
-                _configManager?.UpdateItem(item);
-            }
-
             PostToUi(() =>
             {
                 if (item == null)
                 {
                     return;
+                }
+
+                if (!_isExiting)
+                {
+                    item.Enable = false;
+                    _configManager?.UpdateItem(item);
                 }
 
                 _runStarted.Remove(item);
@@ -970,17 +1068,17 @@ namespace gostGUI
 
         private void OnProcessStopped(ConfigItem item)
         {
-            if (!_isExiting && item != null)
-            {
-                item.Enable = false;
-                _configManager?.UpdateItem(item);
-            }
-
             PostToUi(() =>
             {
                 if (item == null)
                 {
                     return;
+                }
+
+                if (!_isExiting)
+                {
+                    item.Enable = false;
+                    _configManager?.UpdateItem(item);
                 }
 
                 _runStarted.Remove(item);
@@ -991,17 +1089,7 @@ namespace gostGUI
             });
         }
 
-        private void AppendLog(ConfigItem item, string text)
-        {
-            if (item == null || string.IsNullOrEmpty(text))
-            {
-                return;
-            }
-
-            _logViewManager?.AppendText(item, text);
-        }
-
-        /// <summary>写一行系统日志（启动/停止/退出码/错误），12b 会按 LogKind.System 着色。</summary>
+        /// <summary>写一行系统日志（启动/停止/退出码/错误），按 LogKind.System 着色。</summary>
         internal void AppendSystemLine(ConfigItem item, string message)
         {
             if (item == null || string.IsNullOrEmpty(message))
@@ -1009,7 +1097,7 @@ namespace gostGUI
                 return;
             }
 
-            _logViewManager?.AppendText(item, message + Environment.NewLine);
+            _logViewManager?.AppendText(item, LogKind.System, message + Environment.NewLine);
         }
 
         /// <summary>
@@ -1196,6 +1284,7 @@ namespace gostGUI
                 UpdateCountLabel();
                 if (_configList.SelectedItem == null)
                 {
+                    LoadDetailEditor(null);
                     UpdateDetailSummary();
                     _logViewManager?.ShowLogView(null);
                 }
@@ -1221,6 +1310,10 @@ namespace gostGUI
 
         private void ConfigList_SelectedIndexChanged(object sender, EventArgs e)
         {
+            // 先把旧项上还没触发 Leave 的编辑提交掉，再回填新项：
+            // 否则“先改选中项、后触发 Leave”的事件顺序会把旧项的文字写丢。
+            CommitDetailFields();
+
             ConfigItem item = GetCurrentConfigItem();
             if (item != null)
             {
@@ -1229,6 +1322,8 @@ namespace gostGUI
                 LayoutLogViews();
             }
 
+            // 详情编辑器整组重新回填：绝不能把上一项的文字留在新选中的项上。
+            LoadDetailEditor(item);
             UpdateDetailSummary();
             RefreshStatus(item);
         }
@@ -1496,6 +1591,7 @@ namespace gostGUI
         private void NewButton_Click(object sender, EventArgs e)
         {
             EndListBoxEdit(false);
+            CommitDetailFields();
             ConfigItem newItem = _configManager.AddNewItem();
             if (newItem != null)
             {
@@ -1506,6 +1602,7 @@ namespace gostGUI
         private void DuplicateButton_Click(object sender, EventArgs e)
         {
             EndListBoxEdit(false);
+            CommitDetailFields();
             ConfigItem source = GetCurrentConfigItem();
             if (source == null)
             {
@@ -1564,6 +1661,7 @@ namespace gostGUI
         private void DeleteButton_Click(object sender, EventArgs e)
         {
             EndListBoxEdit(false);
+            CommitDetailFields();
             ConfigItem item = GetCurrentConfigItem();
             if (item == null)
             {
@@ -1580,8 +1678,16 @@ namespace gostGUI
 
             // 与 v1.8 一致：删除不弹确认框，先停进程再删配置。
             _starting.Remove(item);
-            _stopping.Remove(item);
+
+            // review minor (a)：删除正在运行的项时，先把它标成“停止中…”再进入停止往返。
+            // 停止可能要等中转/UAC，期间任何启停入口都会因 _stopping 而拒绝重新启动这一项。
+            if (IsItemRunning(item))
+            {
+                _stopping.Add(item);
+            }
+
             ProcessManager manager = _processManager;
+            RefreshStatus(null);
 
             // 两步都可能阻塞（停止要等中转/进程退出），全部放到线程池。
             Task.Run(() =>
@@ -1619,6 +1725,7 @@ namespace gostGUI
         private void MoveSelected(int delta)
         {
             EndListBoxEdit(false);
+            CommitDetailFields();
             ConfigItem item = GetCurrentConfigItem();
             if (item == null)
             {
@@ -1670,6 +1777,7 @@ namespace gostGUI
                 LayoutLogViews();
             }
 
+            LoadDetailEditor(item);
             UpdateDetailSummary();
             RefreshStatus(item);
         }
@@ -1683,10 +1791,10 @@ namespace gostGUI
             LayoutLogViews();
         }
 
-        /// <summary>把模板与各配置项的日志控件铺满日志槽位（LogViewManager 会复制模板的 Location/Size）。</summary>
+        /// <summary>日志视图是 Dock=Fill 的 ThemedRichTextBox；这里只在尺寸变化时再兜一次底。</summary>
         private void LayoutLogViews()
         {
-            if (_logHost == null || _logTemplate == null || _logHost.IsDisposed)
+            if (_logHost == null || _logHost.IsDisposed)
             {
                 return;
             }
@@ -1698,17 +1806,13 @@ namespace gostGUI
             }
 
             var bounds = new Rectangle(0, 0, size.Width, size.Height);
-            _logTemplate.Bounds = bounds;
-
             foreach (Control child in _logHost.Controls)
             {
-                var box = child as TextBox;
-                if (box == null || ReferenceEquals(box, _logTemplate))
+                var box = child as ThemedRichTextBox;
+                if (box != null)
                 {
-                    continue;
+                    box.Bounds = bounds;
                 }
-
-                box.Bounds = bounds;
             }
         }
 
@@ -1744,21 +1848,13 @@ namespace gostGUI
 
         private string GetCurrentLogText()
         {
-            if (_logHost == null)
+            ConfigItem item = GetCurrentConfigItem();
+            if (item == null || _logViewManager == null)
             {
                 return string.Empty;
             }
 
-            foreach (Control child in _logHost.Controls)
-            {
-                var box = child as TextBox;
-                if (box != null && !ReferenceEquals(box, _logTemplate) && box.Visible)
-                {
-                    return box.Text;
-                }
-            }
-
-            return string.Empty;
+            return _logViewManager.GetText(item);
         }
 
         // =====================================================================================
@@ -1792,10 +1888,10 @@ namespace gostGUI
         }
 
         // =====================================================================================
-        // 拖放设置程序（12b 会把这两个处理器挂到程序输入框上）
+        // 拖放设置程序（程序输入框 + 浏览…共用 ApplyProgramToItem）
         // =====================================================================================
 
-        /// <summary>12b 用：把程序输入框接成拖放目标（内层 TextBox 允许拖放 + 两个处理器）。</summary>
+        /// <summary>把程序输入框接成拖放目标（内层 TextBox 允许拖放 + 两个处理器）。</summary>
         public void AttachProgramDropTarget(ThemedTextBox box)
         {
             if (box == null || box.Inner == null)
@@ -1843,7 +1939,7 @@ namespace gostGUI
             ApplyProgramToItem(item, path);
         }
 
-        /// <summary>把路径写进指定配置项的 Program（12b 的“浏览…”与自身拖放都复用这里）。</summary>
+        /// <summary>把路径写进指定配置项的 Program（“浏览…”与拖放都复用这里）。</summary>
         public void ApplyProgramToItem(ConfigItem item, string path)
         {
             if (item == null || string.IsNullOrEmpty(path))
@@ -1852,12 +1948,25 @@ namespace gostGUI
             }
 
             string trimmed = path.Trim();
-            if (string.Equals(item.Program, trimmed, StringComparison.Ordinal))
+            _configManager.UpdateItemProgram(item, trimmed);
+
+            // 程序框正看着这一项：把新路径同步回输入框（拖放/浏览都是“用户已触碰”的路径）。
+            if (ReferenceEquals(item, _detailItem) && _programBox != null &&
+                !string.Equals(_programBox.Text, trimmed, StringComparison.Ordinal))
             {
-                return;
+                _programHintTimer?.Stop();
+                _detailLoading = true;
+                try
+                {
+                    _programBox.Text = trimmed;
+                }
+                finally
+                {
+                    _detailLoading = false;
+                }
             }
 
-            _configManager.UpdateItemProgram(item, trimmed);
+            UpdateProgramHint();
             UpdateDetailSummary();
             RefreshStatus(item);
         }
@@ -1876,6 +1985,564 @@ namespace gostGUI
             }
 
             return files[0];
+        }
+
+        // =====================================================================================
+        // 详情编辑器：程序 / 参数 / 工作目录 / 环境变量 / 以管理员身份运行
+        // 规则：切项整组回填；字段失焦/提交即保存，只改用户碰过的那一个字段。
+        // =====================================================================================
+
+        /// <summary>把指定项的值整组回填进编辑器；item 为 null 时清空并禁用整组字段。</summary>
+        private void LoadDetailEditor(ConfigItem item)
+        {
+            if (_programBox == null)
+            {
+                return;
+            }
+
+            _detailItem = item;
+            bool hasItem = item != null;
+
+            // 回填期间禁止任何“字段变化即保存”的副作用，避免把新项的值写进旧项。
+            _programHintTimer?.Stop();
+            _lastEnvWarningSignature = null;
+            _detailLoading = true;
+            try
+            {
+                _programBox.Enabled = hasItem;
+                _programBrowseButton.Enabled = hasItem;
+                _argsBox.Enabled = hasItem;
+                _workDirBox.Enabled = hasItem;
+                _workDirBrowseButton.Enabled = hasItem;
+                _workDirFromProgramButton.Enabled = hasItem;
+                _envBox.Enabled = hasItem;
+                _runAsAdminToggle.Enabled = hasItem;
+
+                _programBox.Text = hasItem ? (item.Program ?? string.Empty) : string.Empty;
+                _argsBox.Text = hasItem ? (item.Args ?? string.Empty) : string.Empty;
+                _workDirBox.Text = hasItem ? (item.WorkDir ?? string.Empty) : string.Empty;
+                _envBox.Text = hasItem ? FormatEnvForEditor(item) : string.Empty;
+                _runAsAdminToggle.Checked = hasItem && item.RunAsAdmin;
+            }
+            finally
+            {
+                _detailLoading = false;
+            }
+
+            UpdateProgramHint();
+        }
+
+        /// <summary>
+        /// 提交当前编辑器里所有已改动字段（切项前调用）。每个 Commit* 内部都与项当前值比较，
+        /// 没改过的字段不会被重写；_detailLoading 期间（正在回填）整体跳过。
+        /// </summary>
+        private void CommitDetailFields()
+        {
+            if (_detailLoading || _detailItem == null)
+            {
+                return;
+            }
+
+            CommitProgramField();
+            ArgsBox_Leave(null, EventArgs.Empty);
+            CommitWorkDirField();
+            CommitEnvField();
+
+            if (_detailItem.RunAsAdmin != _runAsAdminToggle.Checked)
+            {
+                _detailItem.RunAsAdmin = _runAsAdminToggle.Checked;
+                _configManager.UpdateItem(_detailItem);
+            }
+        }
+
+        /// <summary>
+        /// 退出/隐藏前的最后一道提交：窗口可能在没有触发任何 Leave 的情况下直接关闭，
+        /// 用户刚输入但还没失焦的字段必须在这里落盘，否则会被静默丢弃。
+        /// 提交失败只记调试输出，绝不能拦住退出流程。
+        /// </summary>
+        private void CommitPendingDetailEdits()
+        {
+            try
+            {
+                CommitDetailFields();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("退出前提交详情编辑失败：" + ex.Message);
+            }
+        }
+
+        private void ProgramBox_TextChanged(object sender, EventArgs e)
+        {
+            if (_detailLoading || _programHintTimer == null)
+            {
+                return;
+            }
+
+            // 防抖 ~200ms：停止输入后再解析一次，避免每敲一键都扫 PATH。
+            _programHintTimer.Stop();
+            _programHintTimer.Start();
+        }
+
+        private void ProgramHintTimer_Tick(object sender, EventArgs e)
+        {
+            _programHintTimer.Stop();
+            UpdateProgramHint();
+        }
+
+        private void ProgramBox_Leave(object sender, EventArgs e)
+        {
+            CommitProgramField();
+        }
+
+        private void ProgramBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                CommitProgramField();
+                UpdateProgramHint();
+            }
+        }
+
+        private void CommitProgramField()
+        {
+            if (_detailLoading || _detailItem == null)
+            {
+                return;
+            }
+
+            string value = (_programBox.Text ?? string.Empty).Trim();
+            if (string.Equals(_detailItem.Program ?? string.Empty, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _configManager.UpdateItemProgram(_detailItem, value);
+            UpdateProgramHint();
+        }
+
+        /// <summary>
+        /// 解析程序框里的当前文本（有效环境 = 父环境 + 本项 env），把结果写进提示行：
+        /// 命中显示 → 绝对路径（成功色），失败显示中文错误（危险色）。
+        /// </summary>
+        private void UpdateProgramHint()
+        {
+            if (_programHint == null)
+            {
+                return;
+            }
+
+            if (_detailItem == null)
+            {
+                _programHint.Text = string.Empty;
+                _programHint.ForeColor = _themeManager.Current.TextMuted;
+                return;
+            }
+
+            string program = _programBox == null ? _detailItem.Program : _programBox.Text;
+            string hint;
+            bool found;
+            ResolvedProgram resolved = GetProgramResolution(_detailItem, program);
+            if (resolved != null && resolved.Found)
+            {
+                found = true;
+                hint = "→ " + resolved.FullPath;
+            }
+            else
+            {
+                found = false;
+                hint = resolved != null && !string.IsNullOrEmpty(resolved.Error)
+                    ? resolved.Error
+                    : "无法解析程序，请检查程序名或完整路径。";
+            }
+
+            _programHint.Text = hint;
+            _programHint.ForeColor = found ? _themeManager.Current.Success : _themeManager.Current.Danger;
+        }
+
+        /// <summary>
+        /// 带缓存地解析程序：键 = 程序 + 有效环境签名 + 应用目录。
+        /// 同一份输入（例如主题切换、Leave 后再 Enter）不会重复扫 PATH；env/程序一改，键就变。
+        /// </summary>
+        private ResolvedProgram GetProgramResolution(ConfigItem item, string program)
+        {
+            string key = BuildProgramResolutionKey(item, program);
+            if (_programHintCacheResult != null &&
+                string.Equals(_programHintCacheKey, key, StringComparison.Ordinal))
+            {
+                return _programHintCacheResult;
+            }
+
+            ResolvedProgram result = ResolveProgramForEditor(item, program);
+            _programHintCacheKey = key;
+            _programHintCacheResult = result;
+            return result;
+        }
+
+        private static string BuildProgramResolutionKey(ConfigItem item, string program)
+        {
+            var builder = new StringBuilder();
+            builder.Append(Common.GetApplicationPath()).Append('\u0000');
+            builder.Append(program ?? string.Empty).Append('\u0000');
+
+            if (item != null && item.Env != null)
+            {
+                // 按键名排序，避免字典枚举顺序不同导致本可命中的键变成未命中。
+                var pairs = new List<KeyValuePair<string, string>>(item.Env);
+                pairs.Sort((left, right) => string.Compare(left.Key, right.Key, StringComparison.OrdinalIgnoreCase));
+                foreach (KeyValuePair<string, string> pair in pairs)
+                {
+                    builder.Append(pair.Key).Append('=').Append(pair.Value ?? string.Empty).Append('\u0001');
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        /// <summary>解析程序名；畸形环境/路径只回落成中文错误，不把异常抖给界面。</summary>
+        private static ResolvedProgram ResolveProgramForEditor(ConfigItem item, string program)
+        {
+            try
+            {
+                Dictionary<string, string> effective;
+                string envError;
+                if (!TryBuildEditorEnvironment(item, out effective, out envError))
+                {
+                    // 环境变量本身无效（例如合并后超 32K）：直接把环境错误作为提示，而不是继续搜程序。
+                    return new ResolvedProgram
+                    {
+                        Found = false,
+                        FullPath = string.Empty,
+                        Error = envError
+                    };
+                }
+
+                return ProgramResolver.Resolve(program, Common.GetApplicationPath(), effective);
+            }
+            catch (Exception ex)
+            {
+                return new ResolvedProgram
+                {
+                    Found = false,
+                    FullPath = string.Empty,
+                    Error = "无法解析程序：" + ex.Message
+                };
+            }
+        }
+
+        /// <summary>构建本项的有效环境（父环境 + env 覆盖）；envError 非空表示环境不可用于启动。</summary>
+        private static bool TryBuildEditorEnvironment(
+            ConfigItem item,
+            out Dictionary<string, string> effective,
+            out string error)
+        {
+            effective = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            error = string.Empty;
+            try
+            {
+                List<KeyValuePair<string, string>> parent = ChildEnvironment.SnapshotParentEnvironment();
+                effective = EnvBlock.BuildEffective(parent, item == null ? null : item.Env, out error);
+                return string.IsNullOrEmpty(error);
+            }
+            catch (Exception ex)
+            {
+                error = "构建有效环境失败：" + ex.Message;
+                return false;
+            }
+        }
+
+        private void ArgsBox_Leave(object sender, EventArgs e)
+        {
+            if (_detailLoading || _detailItem == null)
+            {
+                return;
+            }
+
+            string value = _argsBox.Text ?? string.Empty;
+            if (string.Equals(_detailItem.Args ?? string.Empty, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _detailItem.Args = value;
+            _configManager.UpdateItem(_detailItem);
+        }
+
+        private void WorkDirBox_Leave(object sender, EventArgs e)
+        {
+            CommitWorkDirField();
+        }
+
+        private void CommitWorkDirField()
+        {
+            if (_detailLoading || _detailItem == null)
+            {
+                return;
+            }
+
+            string value = _workDirBox.Text ?? string.Empty;
+            if (string.Equals(_detailItem.WorkDir ?? string.Empty, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _detailItem.WorkDir = value;
+            _configManager.UpdateItem(_detailItem);
+        }
+
+        private void WorkDirBrowseButton_Click(object sender, EventArgs e)
+        {
+            if (_detailItem == null)
+            {
+                return;
+            }
+
+            using (var dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "选择工作目录";
+                dialog.ShowNewFolderButton = true;
+                string current = (_workDirBox.Text ?? string.Empty).Trim();
+                if (current.Length > 0 && Directory.Exists(current))
+                {
+                    dialog.SelectedPath = current;
+                }
+
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                _workDirBox.Text = dialog.SelectedPath;
+                CommitWorkDirField();
+            }
+        }
+
+        /// <summary>“取程序目录”：按有效环境解析当前程序，把解析到的目录填进工作目录并立即保存。</summary>
+        private void WorkDirFromProgramButton_Click(object sender, EventArgs e)
+        {
+            if (_detailItem == null)
+            {
+                return;
+            }
+
+            ResolvedProgram resolved = GetProgramResolution(_detailItem, _programBox.Text);
+            if (resolved == null || !resolved.Found || string.IsNullOrEmpty(resolved.FullPath))
+            {
+                ShowBanner(
+                    "无法确定程序目录：" +
+                    (resolved != null && !string.IsNullOrEmpty(resolved.Error)
+                        ? resolved.Error
+                        : "请先在程序框里填写可解析的程序。"),
+                    true);
+                return;
+            }
+
+            string directory;
+            try
+            {
+                directory = Path.GetDirectoryName(resolved.FullPath);
+            }
+            catch (Exception ex)
+            {
+                ShowBanner("无法确定程序目录：" + ex.Message, true);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(directory))
+            {
+                ShowBanner("无法确定程序目录：解析结果没有父目录。", true);
+                return;
+            }
+
+            _workDirBox.Text = directory;
+            CommitWorkDirField();
+        }
+
+        private void EnvBox_Leave(object sender, EventArgs e)
+        {
+            CommitEnvField();
+        }
+
+        private void CommitEnvField()
+        {
+            if (_detailLoading || _detailItem == null)
+            {
+                return;
+            }
+
+            EnvParseResult parsed = EnvBlock.ParseLines(_envBox.Text);
+
+            // 无效行（缺 '=' / 空键）仍留在输入框里，必须让用户知道哪几行被忽略；
+            // 同一组警告只提示一次，避免每次失焦都重复刷系统日志。
+            SurfaceEnvWarnings(parsed.Warnings);
+
+            bool changed = !EnvEquals(_detailItem.Env, parsed.Overrides);
+            if (changed)
+            {
+                // 空表存 null：配置里保持“不覆盖”的语义（与旧配置兼容）。
+                _detailItem.Env = parsed.Overrides.Count == 0 ? null : parsed.Overrides;
+                _configManager.UpdateItem(_detailItem);
+            }
+
+            // 环境变量整体无效（合并后超过 Windows 32K 上限）时必须显形，不能静默忽略。
+            Dictionary<string, string> effective;
+            string envError;
+            if (!TryBuildEditorEnvironment(_detailItem, out effective, out envError))
+            {
+                ShowBanner("环境变量无效：" + envError, true);
+            }
+
+            // 环境变了（尤其是 PATH）必须重算程序提示：旧的红色“未找到”不能继续留在屏幕上。
+            // 环境没变时走缓存，不会重复扫 PATH。
+            if (changed)
+            {
+                UpdateProgramHint();
+            }
+        }
+
+        /// <summary>把 ParseLines 的警告写成当前项的系统日志（同一组警告只提示一次）。</summary>
+        private void SurfaceEnvWarnings(List<string> warnings)
+        {
+            if (warnings == null || warnings.Count == 0)
+            {
+                return;
+            }
+
+            string signature = string.Join("\n", warnings);
+            if (string.Equals(signature, _lastEnvWarningSignature, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastEnvWarningSignature = signature;
+            AppendSystemLine(_detailItem, "环境变量有未保存的行：" + string.Join("；", warnings));
+        }
+
+        /// <summary>比较环境变量覆盖表（键忽略大小写、值逐字比较；null 与空表等价）。</summary>
+        private static bool EnvEquals(Dictionary<string, string> left, Dictionary<string, string> right)
+        {
+            int leftCount = left == null ? 0 : left.Count;
+            int rightCount = right == null ? 0 : right.Count;
+            if (leftCount != rightCount)
+            {
+                return false;
+            }
+
+            if (leftCount == 0)
+            {
+                return true;
+            }
+
+            foreach (KeyValuePair<string, string> pair in left)
+            {
+                string value;
+                if (!right.TryGetValue(pair.Key, out value))
+                {
+                    return false;
+                }
+
+                if (!string.Equals(value, pair.Value, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void RunAsAdminToggle_CheckedChanged(object sender, EventArgs e)
+        {
+            if (_detailLoading || _detailItem == null)
+            {
+                return;
+            }
+
+            if (_detailItem.RunAsAdmin == _runAsAdminToggle.Checked)
+            {
+                return;
+            }
+
+            _detailItem.RunAsAdmin = _runAsAdminToggle.Checked;
+            _configManager.UpdateItem(_detailItem);
+        }
+
+        private void ProgramBrowseButton_Click(object sender, EventArgs e)
+        {
+            if (_detailItem == null)
+            {
+                return;
+            }
+
+            using (var dialog = new OpenFileDialog())
+            {
+                dialog.Title = "选择程序";
+                dialog.CheckFileExists = true;
+                dialog.Filter = "程序文件 (*.exe;*.com;*.bat;*.cmd)|*.exe;*.com;*.bat;*.cmd|所有文件 (*.*)|*.*";
+                string current = (_programBox.Text ?? string.Empty).Trim();
+                if (current.Length > 0 && File.Exists(current))
+                {
+                    dialog.FileName = current;
+                }
+
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                ApplyProgramToItem(_detailItem, dialog.FileName);
+                UpdateProgramHint();
+            }
+        }
+
+        /// <summary>
+        /// R11：环境变量文本格式无法表达 CR/LF/TAB，渲染时把值里的连续换行/制表符折叠成一个空格，
+        /// 键顺序原样保留。格式化本身复用 <see cref="EnvBlock.FormatLines"/>（单一实现），
+        /// 这里只负责在交给它之前消毒值。
+        /// </summary>
+        private static string FormatEnvForEditor(ConfigItem item)
+        {
+            if (item == null || item.Env == null || item.Env.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            var sanitized = new List<KeyValuePair<string, string>>(item.Env.Count);
+            foreach (KeyValuePair<string, string> pair in item.Env)
+            {
+                sanitized.Add(new KeyValuePair<string, string>(pair.Key, SanitizeEnvValue(pair.Value)));
+            }
+
+            return EnvBlock.FormatLines(sanitized);
+        }
+
+        private static string SanitizeEnvValue(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            var builder = new StringBuilder(value.Length);
+            bool lastWasControl = false;
+            foreach (char c in value)
+            {
+                if (c == '\r' || c == '\n' || c == '\t')
+                {
+                    if (!lastWasControl)
+                    {
+                        builder.Append(' ');
+                    }
+                    lastWasControl = true;
+                    continue;
+                }
+
+                lastWasControl = false;
+                builder.Append(c);
+            }
+
+            return builder.ToString();
         }
 
         // =====================================================================================
@@ -1991,6 +2658,9 @@ namespace gostGUI
         /// <summary>关闭窗口 = 隐藏到托盘；真正退出只有托盘/按钮的“退出”。</summary>
         private void FormMain_FormClosing(object sender, FormClosingEventArgs e)
         {
+            // 窗口可能在最后一次失焦之前就被关闭：先把详情编辑器里待提交的字段落盘。
+            CommitPendingDetailEdits();
+
             if (_isExiting)
             {
                 return;
@@ -2026,6 +2696,9 @@ namespace gostGUI
             {
                 return;
             }
+
+            // 托盘/按钮“退出”同样可能发生在最后一次失焦之前：在置 _isExiting 之前提交。
+            CommitPendingDetailEdits();
 
             _exitRequested = true;
             _isExiting = true;
@@ -2122,6 +2795,15 @@ namespace gostGUI
             catch (Exception)
             {
                 // 计时器已释放。
+            }
+
+            try
+            {
+                _logViewManager?.Dispose();
+            }
+            catch (Exception)
+            {
+                // 日志视图可能已随宿主控件释放。
             }
 
             try
@@ -2403,12 +3085,15 @@ namespace gostGUI
             LayoutLogViews();
             ApplyTheme();
 
-            // 演示日志：让“输出”槽位不是空白（真实日志由 12b 的控件接管）。
+            // 演示日志：让“输出”槽位不是空白。日志走队列 + UI 定时器，快照没有消息循环，
+            // 必须手动排空一次，PNG 里才看得到内容。
             IList<ConfigItem> items = ListItems();
             foreach (ConfigItem item in items)
             {
                 AppendSystemLine(item, "系统：演示数据，未启动任何进程。");
             }
+
+            _logViewManager?.DrainForTest();
         }
 
         /// <summary>快照用的演示配置项：只进列表，不写 config.json，也不启动任何进程。</summary>
@@ -2433,7 +3118,8 @@ namespace gostGUI
                 new ConfigItem
                 {
                     Name = "默认节点",
-                    Program = "gost.exe",
+                    // 演示“解析成功”的绿色提示：cmd.exe 在 PATH 里真实存在。
+                    Program = "cmd.exe",
                     Args = "-L 127.0.0.1:8080 -F tls://abc.com:4000"
                 },
                 new ConfigItem
@@ -2475,6 +3161,7 @@ namespace gostGUI
             ApplyTheme();
             PerformLayout();
             LayoutLogViews();
+            _logViewManager?.DrainForTest();
 
             using (var bitmap = new Bitmap(SnapshotWidth, SnapshotHeight, PixelFormat.Format32bppArgb))
             {

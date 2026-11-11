@@ -160,6 +160,21 @@ namespace gostGUI
             Check("Form_PostToUi_MarshalsBeforeHandleExists", FormPostToUiMarshalsBeforeHandleExists);
             Check("Form_DuplicateKeepsListOrderInSyncWithManager", FormDuplicateKeepsListOrderInSyncWithManager);
             Check("Form_RenameEditorAlignsWithPaintedName", FormRenameEditorAlignsWithPaintedName);
+
+            // 主窗口详情编辑器（Task 12b）：程序解析提示、环境变量编辑框的换行消毒与保存回写。
+            Check("Form_ResolvesProgramHint", FormResolvesProgramHint);
+            Check("Form_EnvEditorSanitizesNewlines", FormEnvEditorSanitizesNewlines);
+            Check("Form_DetailEditorLoadsSelectedItemOnly", FormDetailEditorLoadsSelectedItemOnly);
+            Check("Form_ProgramHintIsDebounced", FormProgramHintIsDebounced);
+            Check("Form_EnvPathEditRefreshesHint", FormEnvPathEditRefreshesHint);
+            Check("Form_CommitsPendingEditsOnExit", FormCommitsPendingEditsOnExit);
+
+            // 主题化批量日志（Task 12b）：三类着色 + 1000 行上限 + 用户上翻时不抢滚动条。
+            Check("Log_BatchesAndColors", LogBatchesAndColors);
+            Check("Log_DoesNotAutoScrollWhenUserScrolledUp", LogDoesNotAutoScrollWhenUserScrolledUp);
+            Check("Log_ClearDropsQueuedLines", LogClearDropsQueuedLines);
+            Check("Log_TimerDrainsInBatch", LogTimerDrainsInBatch);
+
             Check("Form_SnapshotRendersBothThemes", FormSnapshotRendersBothThemes);
         }
 
@@ -4227,17 +4242,23 @@ namespace gostGUI
                         Rectangle editor = form.RenameEditorBoundsForTest;
                         Assert(editor.Height > 0 && editor.Width > 0, "行内编辑框没有显示出来。");
 
-                        // 行高按 44 DIP 缩放，据此把 DIP 换算成像素，不依赖具体 DPI。
-                        int scale = Math.Max(1, row.Height / 44);
-                        int dotRight = row.Left + (20 * scale);
-                        int nameTop = row.Top + (3 * scale);
-                        int nameBottom = row.Top + (22 * scale);
+                        // R43：用 DeviceDpi 把 DIP 换算成像素。原来的 row.Height / 44 是整数除法，
+                        // 125%/150% 缩放下会得到 1，把按 DIP 正确的几何误判成越界。
+                        int dpi = Math.Max(96, form.DeviceDpi);
+                        int ToPixels(int dip)
+                        {
+                            return (int)Math.Round(dip * dpi / 96.0, MidpointRounding.AwayFromZero);
+                        }
+
+                        int dotRight = row.Left + ToPixels(20);
+                        int nameTop = row.Top + ToPixels(3);
+                        int nameBottom = row.Top + ToPixels(22);
 
                         Assert(editor.Left >= dotRight,
                             "重命名编辑框压住了状态点：editor.Left=" + editor.Left + "，状态点右边缘=" + dotRight);
                         Assert(editor.Top >= nameTop,
                             "重命名编辑框比名称文本高：" + editor.Top + " < " + nameTop);
-                        Assert(editor.Bottom <= nameBottom + (2 * scale),
+                        Assert(editor.Bottom <= nameBottom + ToPixels(2),
                             "重命名编辑框超出名称行：" + editor.Bottom + " > " + nameBottom);
                         Assert(editor.Right <= row.Right,
                             "重命名编辑框超出列表宽度：" + editor.Right + " > " + row.Right);
@@ -4247,6 +4268,594 @@ namespace gostGUI
             finally
             {
                 DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// Task 12b：程序框下方的解析提示必须按“有效环境”（父环境 + 本项 env）解析，
+        /// 命中时显示 → 完整路径 + 成功色，裸名找不到时显示中文错误 + 危险色。
+        /// </summary>
+        private static void FormResolvesProgramHint()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string existing = Path.Combine(dir, "resolved-tool.exe");
+                File.WriteAllText(existing, string.Empty);
+
+                string path = Path.Combine(dir, "config.json");
+                var data = new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "提示用例", Program = string.Empty, Args = string.Empty }
+                    }
+                };
+                Assert(Common.SaveTo(data, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                string missingText = null;
+                Color missingColor = default(Color);
+                Color danger = default(Color);
+                string foundText = null;
+                Color foundColor = default(Color);
+                Color success = default(Color);
+
+                // 窗体用例一律在独立 STA 线程上构造（与快照用例一致）。
+                RunOnDedicatedSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        danger = form.CurrentPalette.Danger;
+                        success = form.CurrentPalette.Success;
+
+                        form.SetProgramFieldForTest("gostgui-12b-definitely-missing");
+                        missingText = form.ProgramHintTextForTest;
+                        missingColor = form.ProgramHintColorForTest;
+
+                        form.SetProgramFieldForTest(existing);
+                        foundText = form.ProgramHintTextForTest;
+                        foundColor = form.ProgramHintColorForTest;
+                    }
+                });
+
+                Assert(!string.IsNullOrWhiteSpace(missingText), "裸名找不到时提示不能为空。");
+                Assert(missingText.IndexOfAny(new[] { '未', '找', '不', '错' }) >= 0,
+                    "裸名找不到时应在提示里给出中文错误：" + missingText);
+                AssertEqual(danger, missingColor);
+
+                Assert(foundText != null && foundText.StartsWith("→", StringComparison.Ordinal),
+                    "解析成功时提示应以 → 开头：" + foundText);
+                Assert(foundText.Contains(existing), "解析成功时提示应包含绝对路径：" + foundText);
+                AssertEqual(success, foundColor);
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// R11（Task 12b）：环境变量值里的 CR/LF/TAB 无法用“每行一条 KEY=VALUE”表达，
+        /// 渲染时折叠成一个空格；提交后保存的也必须是折叠后的值，且保持键顺序。
+        /// </summary>
+        private static void FormEnvEditorSanitizesNewlines()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                var item = new ConfigItem
+                {
+                    Name = "环境用例",
+                    Program = "cmd.exe",
+                    Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["KEEP"] = "1",
+                        ["MULTI"] = "第一行\r\n第二行",
+                        ["TAB"] = "a\tb"
+                    }
+                };
+                Assert(Common.SaveTo(new ConfigData { Items = new List<ConfigItem> { item } }, path),
+                    "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                string editorText = null;
+
+                RunOnDedicatedSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        editorText = form.EnvFieldTextForTest;
+                        form.CommitEnvFieldForTest();
+                    }
+                });
+
+                string[] lines = (editorText ?? string.Empty).Replace("\r\n", "\n").Split('\n');
+                AssertEqual(3, lines.Length);
+                AssertEqual("KEEP=1", lines[0]);
+                AssertEqual("MULTI=第一行 第二行", lines[1]);
+                AssertEqual("TAB=a b", lines[2]);
+
+                AssertEqual("第一行 第二行", manager.Items[0].Env["MULTI"]);
+                AssertEqual("a b", manager.Items[0].Env["TAB"]);
+
+                ConfigLoadResult reloaded = Common.LoadFrom(path);
+                Assert(reloaded.Ok, "落盘后的配置应可解析：" + reloaded.Error);
+                Dictionary<string, string> saved = reloaded.Data.Items[0].Env;
+                AssertEqual("第一行 第二行", saved["MULTI"]);
+                AssertEqual("a b", saved["TAB"]);
+                AssertEqual("KEEP|MULTI|TAB", string.Join("|", saved.Keys));
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// Task 12b 绑定约束：切项必须整组回填，不同项绝不能继承上一项的输入框文字。
+        /// </summary>
+        private static void FormDetailEditorLoadsSelectedItemOnly()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string workDirectory = Path.GetTempPath();
+                string path = Path.Combine(dir, "config.json");
+                var data = new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem
+                        {
+                            Name = "甲",
+                            Program = "cmd.exe",
+                            Args = "-a 甲",
+                            WorkDir = string.Empty,
+                            Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["A_ONLY"] = "1"
+                            }
+                        },
+                        new ConfigItem
+                        {
+                            Name = "乙",
+                            Program = string.Empty,
+                            Args = "-b 乙",
+                            WorkDir = workDirectory,
+                            RunAsAdmin = true,
+                            Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["B_ONLY"] = "2"
+                            }
+                        }
+                    }
+                };
+                Assert(Common.SaveTo(data, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                RunOnDedicatedSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        form.SelectItemForTest(manager.Items[0]);
+                        AssertEqual("cmd.exe", form.ProgramFieldTextForTest);
+                        AssertEqual("-a 甲", form.ArgsFieldTextForTest);
+                        AssertEqual(string.Empty, form.WorkDirFieldTextForTest);
+                        AssertEqual(false, form.RunAsAdminFieldForTest);
+                        AssertEqual("A_ONLY=1", form.EnvFieldTextForTest);
+
+                        form.SelectItemForTest(manager.Items[1]);
+                        AssertEqual(string.Empty, form.ProgramFieldTextForTest);
+                        AssertEqual("-b 乙", form.ArgsFieldTextForTest);
+                        AssertEqual(workDirectory, form.WorkDirFieldTextForTest);
+                        AssertEqual(true, form.RunAsAdminFieldForTest);
+                        AssertEqual("B_ONLY=2", form.EnvFieldTextForTest);
+
+                        form.SelectItemForTest(manager.Items[0]);
+                        AssertEqual("cmd.exe", form.ProgramFieldTextForTest);
+                        AssertEqual("-a 甲", form.ArgsFieldTextForTest);
+                        AssertEqual(string.Empty, form.WorkDirFieldTextForTest);
+                        AssertEqual(false, form.RunAsAdminFieldForTest);
+                        AssertEqual("A_ONLY=1", form.EnvFieldTextForTest);
+                    }
+                });
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// Task 12b：程序框的解析提示必须防抖——只改文字时不能同步扫 PATH，200ms 到期后才刷新。
+        /// </summary>
+        private static void FormProgramHintIsDebounced()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                Assert(Common.SaveTo(new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "防抖用例", Program = "cmd.exe" }
+                    }
+                }, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                RunOnDedicatedSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        string initial = form.ProgramHintTextForTest;
+                        Assert(initial.StartsWith("→", StringComparison.Ordinal),
+                            "初始程序应解析成功：" + initial);
+
+                        form.SetProgramTextOnlyForTest("gostgui-12b-missing-debounce");
+                        AssertEqual(initial, form.ProgramHintTextForTest);
+
+                        form.FireProgramHintDebounceForTest();
+                        AssertEqual(form.CurrentPalette.Danger, form.ProgramHintColorForTest);
+                        Assert(form.ProgramHintTextForTest.IndexOf("未找到", StringComparison.Ordinal) >= 0,
+                            "防抖到期后应显示中文未找到错误：" + form.ProgramHintTextForTest);
+                    }
+                });
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// review minor：改环境变量（例如给 PATH 追加目录）后必须立刻重算程序提示。
+        /// 旧的“未找到”红提示不能留在屏幕上——那和“程序其实已经可以解析”互相矛盾。
+        /// </summary>
+        private static void FormEnvPathEditRefreshesHint()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string bin = Path.Combine(dir, "bin");
+                Directory.CreateDirectory(bin);
+                string tool = Path.Combine(bin, "gostgui-path-tool.exe");
+                File.WriteAllText(tool, string.Empty);
+
+                string path = Path.Combine(dir, "config.json");
+                Assert(Common.SaveTo(new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "PATH 用例", Program = "gostgui-path-tool" }
+                    }
+                }, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                RunOnDedicatedSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        AssertEqual(form.CurrentPalette.Danger, form.ProgramHintColorForTest);
+                        Assert(form.ProgramHintTextForTest.IndexOf("未找到", StringComparison.Ordinal) >= 0,
+                            "PATH 里没有工具时应先显示未找到：" + form.ProgramHintTextForTest);
+
+                        string parentPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+                        form.SetEnvTextForTest("PATH=" + bin + ";" + parentPath);
+                        form.CommitEnvFieldForTest();
+
+                        AssertEqual(form.CurrentPalette.Success, form.ProgramHintColorForTest);
+                        Assert(form.ProgramHintTextForTest.IndexOf(tool, StringComparison.OrdinalIgnoreCase) >= 0,
+                            "PATH 更新后提示应包含解析到的绝对路径：" + form.ProgramHintTextForTest);
+                    }
+                });
+
+                AssertEqual(bin + ";" + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty),
+                    manager.Items[0].Env["PATH"]);
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// review Important：窗口关闭/托盘退出时，用户刚输入但还没触发 Leave 的字段必须落盘。
+        /// 这里分别走 FormClosing 处理器与托盘退出的“退出前提交”路径。
+        /// </summary>
+        private static void FormCommitsPendingEditsOnExit()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                Assert(Common.SaveTo(new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "退出用例", Program = "cmd.exe", Args = string.Empty }
+                    }
+                }, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                RunOnDedicatedSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        // ① 关闭窗口（UserClosing → 隐藏到托盘）前提交。
+                        form.SetArgsTextForTest("关闭窗口前的未提交参数");
+                        form.SetEnvTextForTest("LATE=1");
+                        form.TriggerFormClosingForTest();
+                        AssertEqual("关闭窗口前的未提交参数", manager.Items[0].Args);
+                        AssertEqual("1", manager.Items[0].Env["LATE"]);
+
+                        // ② 托盘/按钮“退出”前提交。
+                        form.SetArgsTextForTest("托盘退出前的未提交参数");
+                        form.SetEnvTextForTest("LATE2=2");
+                        form.CommitPendingEditsForTest();
+                        AssertEqual("托盘退出前的未提交参数", manager.Items[0].Args);
+                        AssertEqual("2", manager.Items[0].Env["LATE2"]);
+                    }
+                });
+
+                ConfigLoadResult reloaded = Common.LoadFrom(path);
+                Assert(reloaded.Ok, "落盘后的配置应可解析：" + reloaded.Error);
+                AssertEqual("托盘退出前的未提交参数", reloaded.Data.Items[0].Args);
+                AssertEqual("2", reloaded.Data.Items[0].Env["LATE2"]);
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// Task 12b：日志面板必须批量排空，stdout/stderr/系统三类各用各自的颜色，
+        /// 并且超过 1000 行时整段清空（沿用 v1.8 的策略）。
+        /// </summary>
+        private static void LogBatchesAndColors()
+        {
+            RunOnDedicatedSta(() =>
+            {
+                using (var host = new Panel { Size = new Size(900, 300) })
+                using (var manager = new LogViewManager(host, new Font("Consolas", 10f), action =>
+                {
+                    action();
+                    return true;
+                }))
+                {
+                    var item = new ConfigItem { Name = "日志用例" };
+                    manager.AddLogView(item);
+                    ForceControlHandles(host);
+
+                    manager.AppendText(item, LogKind.Stdout, "标准输出\n");
+                    manager.AppendText(item, LogKind.Stderr, "错误输出\n");
+                    manager.AppendText(item, LogKind.System, "系统消息\n");
+                    manager.DrainForTest();
+
+                    ThemedRichTextBox view = manager.GetViewForTest(item);
+                    Assert(view != null, "日志视图没有创建。");
+                    RichTextBox box = view.Inner;
+                    string text = box.Text;
+                    int stdoutIndex = text.IndexOf("标准输出", StringComparison.Ordinal);
+                    int stderrIndex = text.IndexOf("错误输出", StringComparison.Ordinal);
+                    int systemIndex = text.IndexOf("系统消息", StringComparison.Ordinal);
+                    Assert(stdoutIndex >= 0 && stderrIndex >= 0 && systemIndex >= 0,
+                        "三类日志没有全部写入：" + text);
+
+                    AssertRunColour(box, stdoutIndex, Palette.Light.LogStdout);
+                    AssertRunColour(box, stderrIndex, Palette.Light.LogStderr);
+                    AssertRunColour(box, systemIndex, Palette.Light.LogSystem);
+
+                    for (int i = 0; i < 1200; i++)
+                    {
+                        manager.AppendText(item, LogKind.Stdout, "第 " + i + " 行\n");
+                    }
+
+                    manager.DrainForTest();
+                    Assert(manager.LineCountForTest(item) <= 1000,
+                        "日志行数上限失效：" + manager.LineCountForTest(item));
+                    Assert(box.TextLength > 0, "超过上限后应保留最新内容。");
+                    Assert(!box.Text.Contains("第 0 行\n", StringComparison.Ordinal),
+                        "超过上限时应整段清空旧内容。");
+
+                    // 系统行里带“失败”时按危险色显示（review test gap）。
+                    manager.AppendText(item, LogKind.System, "启动失败：演示错误\n");
+                    manager.DrainForTest();
+                    int errorIndex = box.Text.IndexOf("启动失败", StringComparison.Ordinal);
+                    Assert(errorIndex >= 0, "系统错误行没有写入日志。");
+                    AssertRunColour(box, errorIndex, Palette.Light.Danger);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Task 12b：用户往上翻日志时不抢滚动条；只有已经贴底时才跟着新日志走。
+        /// </summary>
+        private static void LogDoesNotAutoScrollWhenUserScrolledUp()
+        {
+            RunOnDedicatedSta(() =>
+            {
+                using (var host = new Panel { Size = new Size(900, 240) })
+                using (var manager = new LogViewManager(host, new Font("Consolas", 10f), action =>
+                {
+                    action();
+                    return true;
+                }))
+                {
+                    var item = new ConfigItem { Name = "滚动用例" };
+                    manager.AddLogView(item);
+                    ForceControlHandles(host);
+                    host.PerformLayout();
+
+                    for (int i = 0; i < 120; i++)
+                    {
+                        manager.AppendText(item, LogKind.Stdout, "第 " + i + " 行：用于制造可滚动日志\n");
+                    }
+
+                    manager.DrainForTest();
+
+                    ThemedRichTextBox view = manager.GetViewForTest(item);
+                    Assert(view != null, "日志视图没有创建。");
+                    RichTextBox box = view.Inner;
+                    Assert(box.TextLength > 0, "日志内容为空，无法验证滚动行为。");
+
+                    box.SelectionStart = 0;
+                    box.SelectionLength = 0;
+                    box.ScrollToCaret();
+                    int firstVisibleBefore = box.GetCharIndexFromPosition(new Point(1, 1));
+                    Assert(firstVisibleBefore <= 2, "用例没能把日志滚到顶部：" + firstVisibleBefore);
+
+                    manager.AppendText(item, LogKind.Stdout, "用户在看上面时追加的一行\n");
+                    manager.DrainForTest();
+                    int firstVisibleAfter = box.GetCharIndexFromPosition(new Point(1, 1));
+                    AssertEqual(firstVisibleBefore, firstVisibleAfter);
+
+                    // 贴底后再追加：必须跟随到最新一行。
+                    box.SelectionStart = box.TextLength;
+                    box.SelectionLength = 0;
+                    box.ScrollToCaret();
+                    manager.AppendText(item, LogKind.Stdout, "贴底时追加的一行\n");
+                    manager.DrainForTest();
+
+                    Point last = box.GetPositionFromCharIndex(box.TextLength - 1);
+                    Assert(last.Y + box.Font.Height <= box.ClientSize.Height + 2,
+                        "贴底时追加应自动滚动到底部；last.Y=" + last.Y + "，clientHeight=" + box.ClientSize.Height);
+                }
+            });
+        }
+
+        /// <summary>
+        /// review test gap：清空前已经排队的日志不能在清空后又冒出来（按 generation 丢弃）。
+        /// </summary>
+        private static void LogClearDropsQueuedLines()
+        {
+            RunOnDedicatedSta(() =>
+            {
+                using (var host = new Panel { Size = new Size(900, 300) })
+                using (var manager = new LogViewManager(host, new Font("Consolas", 10f), action =>
+                {
+                    action();
+                    return true;
+                }))
+                {
+                    var item = new ConfigItem { Name = "清空用例" };
+                    manager.AddLogView(item);
+                    ForceControlHandles(host);
+
+                    manager.AppendText(item, LogKind.Stdout, "清空前排队的一行\n");
+                    manager.ClearLog(item);
+                    manager.DrainForTest();
+
+                    ThemedRichTextBox view = manager.GetViewForTest(item);
+                    Assert(view != null, "日志视图没有创建。");
+                    Assert(!view.Text.Contains("清空前排队的一行", StringComparison.Ordinal),
+                        "清空前排队的日志不应在清空后出现：" + view.Text);
+                    AssertEqual(0, manager.LineCountForTest(item));
+
+                    manager.AppendText(item, LogKind.System, "清空后的一行\n");
+                    manager.DrainForTest();
+                    Assert(view.Text.Contains("清空后的一行", StringComparison.Ordinal),
+                        "清空后的新日志应正常写入。");
+                    AssertEqual(1, manager.LineCountForTest(item));
+                }
+            });
+        }
+
+        /// <summary>
+        /// review test gap：Timer 批量排空路径——AppendText 只入队、不同步写控件；
+        /// Tick 在 postToUi 的（UI）线程上一次性排空整批。
+        /// </summary>
+        private static void LogTimerDrainsInBatch()
+        {
+            RunOnDedicatedSta(() =>
+            {
+                int uiThreadId = Thread.CurrentThread.ManagedThreadId;
+                int drainedThreadId = 0;
+
+                using (var host = new Panel { Size = new Size(900, 300) })
+                using (var manager = new LogViewManager(host, new Font("Consolas", 10f), action =>
+                {
+                    drainedThreadId = Thread.CurrentThread.ManagedThreadId;
+                    action();
+                    return true;
+                }))
+                {
+                    var item = new ConfigItem { Name = "定时器用例" };
+                    manager.AddLogView(item);
+                    ForceControlHandles(host);
+                    ThemedRichTextBox view = manager.GetViewForTest(item);
+                    Assert(view != null, "日志视图没有创建。");
+
+                    string[] lines = { "第一行\n", "第二行\n", "第三行\n", "第四行\n", "第五行\n" };
+                    foreach (string line in lines)
+                    {
+                        manager.AppendText(item, LogKind.Stdout, line);
+                    }
+
+                    // 只入队，不允许同步写控件（工作线程绝不能阻塞在 UI 上）。
+                    AssertEqual(string.Empty, view.Text);
+
+                    manager.PumpTimerForTest();
+
+                    foreach (string line in lines)
+                    {
+                        Assert(view.Text.Contains(line.TrimEnd('\n'), StringComparison.Ordinal),
+                            "Timer 排空后应包含：" + line.TrimEnd('\n'));
+                    }
+
+                    AssertEqual(uiThreadId, drainedThreadId);
+                }
+            });
+        }
+
+        /// <summary>窗体/控件用例专用的独立 STA 线程：无论调用线程是不是 STA 都另起一条并等待结束。</summary>
+        private static void RunOnDedicatedSta(Action body)
+        {
+            if (body == null) throw new ArgumentNullException(nameof(body));
+
+            Exception failure = null;
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    body();
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+            });
+            thread.IsBackground = true;
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            Assert(thread.Join(TimeSpan.FromSeconds(120)), "独立 STA 用例线程未在 120 秒内结束。");
+
+            if (failure != null)
+            {
+                if (failure is SelfTestFailureException)
+                {
+                    throw failure;
+                }
+
+                throw new SelfTestFailureException("独立 STA 线程中的断言失败：" + DescribeFailure(failure));
+            }
+        }
+
+        /// <summary>递归建句柄（隐藏窗体上 CreateControl 未必足够，访问 Handle 才会真正创建）。</summary>
+        private static void ForceControlHandles(Control control)
+        {
+            if (control == null)
+            {
+                return;
+            }
+
+            IntPtr handle = control.Handle;
+            foreach (Control child in control.Controls)
+            {
+                ForceControlHandles(child);
             }
         }
 
