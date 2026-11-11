@@ -171,8 +171,9 @@ namespace gostGUI
             }
         }
 
-        void OnProcessOutputReceived(ConfigItem item, string data)
+        void OnProcessOutputReceived(ConfigItem item, LogKind kind, string data)
         {
+            // Task 12 会按 LogKind 着色；这里先保持原有行为，只做最小适配。
             update(data, item);
         }
 

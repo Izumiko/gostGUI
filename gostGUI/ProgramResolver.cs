@@ -5,13 +5,6 @@ using gostGUI.Shared;
 
 namespace gostGUI
 {
-    /// <summary>可启动程序的类型：exe/com 直接启动，bat/cmd 需要 cmd.exe 包装后再启动。</summary>
-    public enum ChildKind
-    {
-        Executable,
-        Batch
-    }
-
     /// <summary>程序解析结果；Found=false 时 Error 一定有面向用户的中文说明。</summary>
     public sealed class ResolvedProgram
     {

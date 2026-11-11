@@ -73,8 +73,10 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Common.cs" />
+    <Compile Include="LogKind.cs" />
     <Compile Include="SelfTest.cs" />
     <Compile Include="ProgramResolver.cs" />
+    <Compile Include="LaunchPipeline.cs" />
     <Compile Include="Theme\ThemeMode.cs" />
     <Compile Include="Shared\*.cs" />
     <Compile Include="FormMain.cs">

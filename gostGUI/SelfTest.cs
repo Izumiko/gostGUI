@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -16,6 +17,7 @@ namespace gostGUI
     {
         private const string LogFileName = "selftest.log";
         private static readonly List<TestCase> Cases = new List<TestCase>();
+        private static readonly List<string> Notices = new List<string>();
 
         static SelfTest()
         {
@@ -38,6 +40,10 @@ namespace gostGUI
             Check("Env_BuildEffective_TooLarge_ReturnsError", EnvBuildEffectiveTooLargeReturnsError);
             Check("Env_FormatLines_RoundTrips", EnvFormatLinesRoundTrips);
 
+            // 子进程环境块应用：32767+2 守卫与“无覆盖即不碰 psi”。纯内存用例，不启动进程。
+            Check("ChildEnv_TooLargeBlock_ReturnsChineseError", ChildEnvTooLargeBlockReturnsChineseError);
+            Check("ChildEnv_NoOverrides_IsNoOp", ChildEnvNoOverridesIsNoOp);
+
             // 程序解析：PATH / PATHEXT / 有效环境。夹具只建空文件，绝不启动进程。
             Check("Resolve_BareName_FoundInPathDir", ResolveBareNameFoundInPathDir);
             Check("Resolve_BareName_AppDirWins", ResolveBareNameAppDirWins);
@@ -53,6 +59,47 @@ namespace gostGUI
             Check("Resolve_Ps1_IsRejected", ResolvePs1IsRejected);
             Check("Resolve_MalformedPath_DoesNotThrow", ResolveMalformedPathDoesNotThrow);
             Check("Resolve_EmptyProgram_ReturnsError", ResolveEmptyProgramReturnsError);
+
+            // 启动管线：有效环境 → 解析程序 → 解析工作目录 → 得到启动参数。夹具只建空文件，绝不启动进程。
+            Check("Pipeline_EmptyProgram_ReturnsError", PipelineEmptyProgramReturnsError);
+            Check("Pipeline_ResolvesAndExpandsWorkDir", PipelineResolvesAndExpandsWorkDir);
+            Check("Pipeline_DefaultWorkDirIsBaseDir", PipelineDefaultWorkDirIsBaseDir);
+            Check("Pipeline_MissingWorkDir_ReturnsError", PipelineMissingWorkDirReturnsError);
+            Check("Pipeline_BatchWrapsWithCmd", PipelineBatchWrapsWithCmd);
+            Check("Pipeline_KeepsArgsVerbatim", PipelineKeepsArgsVerbatim);
+            Check("Pipeline_PropagatesEnvOverrides", PipelinePropagatesEnvOverrides);
+            Check("Pipeline_WorkDir_UsesParentEffectiveEnv", PipelineWorkDirUsesParentEffectiveEnv);
+            Check("Pipeline_RelativeWorkDir_ResolvesAgainstBaseDir", PipelineRelativeWorkDirResolvesAgainstBaseDir);
+            Check("Pipeline_MalformedWorkDir_DoesNotThrow", PipelineMalformedWorkDirDoesNotThrow);
+            Check("Pipeline_EnvTooLarge_ReturnsEnvError", PipelineEnvTooLargeReturnsEnvError);
+            Check("Pipeline_NotFound_UsesR13Message", PipelineNotFoundUsesR13Message);
+            Check("Pipeline_BatchWithEmptyArgs_WrapsWithTrailingQuotes", PipelineBatchWithEmptyArgsWrapsWithTrailingQuotes);
+            Check("Pipeline_BatchWithSpacesAndQuotedArgs_ExactWrapper", PipelineBatchWithSpacesAndQuotedArgsExactWrapper);
+            Check("Pipeline_NullWorkDir_IsTolerated", PipelineNullWorkDirIsTolerated);
+
+            // IPC 契约：spec 编解码与 NDJSON 帧。全部是内存往返，不建临时文件、不启动进程。
+            Check("Spec_Base64RoundTrip", SpecBase64RoundTrip);
+            Check("Spec_NeedsTempFile_WhenTooLong", SpecNeedsTempFileWhenTooLong);
+            Check("Spec_JsonRoundTrip_PreservesChineseAndQuotes", SpecJsonRoundTripPreservesChineseAndQuotes);
+            Check("Spec_FromBase64_Malformed_ThrowsChinese", SpecFromBase64MalformedThrowsChinese);
+            Check("Ipc_FrameRoundTrip_EscapesNewlineTabQuoteBackslash", IpcFrameRoundTripEscapesNewlineTabQuoteBackslash);
+            Check("Ipc_FrameRoundTrip_ChineseAndEmptyString", IpcFrameRoundTripChineseAndEmptyString);
+            Check("Ipc_Read_ReturnsNullAtEof", IpcReadReturnsNullAtEof);
+            Check("Ipc_Read_MalformedJson_ThrowsChinese", IpcReadMalformedJsonThrowsChinese);
+
+            // 直连启动：真实拉起 cmd /d /s /c 子进程；等待一律有 10s 上限，用例结束即释放管理器（Job 兜底清理）。
+            Check("Direct_CapturesStdoutAndStderr", DirectCapturesStdoutAndStderr);
+            Check("Direct_ReportsExitCode", DirectReportsExitCode);
+            Check("Direct_AppliesEnvOverrides", DirectAppliesEnvOverrides);
+            Check("Direct_UsesWorkingDirectory", DirectUsesWorkingDirectory);
+            Check("Direct_MissingProgram_SetsErrorAndDoesNotStart", DirectMissingProgramSetsErrorAndDoesNotStart);
+            Check("Direct_NonexistentFile_ReturnsFalseWithoutThrowing", DirectNonexistentFileReturnsFalseWithoutThrowing);
+            Check("Direct_GetChildPid_IsLiveThenZero", DirectGetChildPidIsLiveThenZero);
+            Check("Direct_ElevationRequired_IsDetected", DirectElevationRequiredIsDetected);
+
+            // 边界用例放在 Direct 之后：accept 分支会触发一次性的父环境规范化，
+            // 不能抢在 Direct_AppliesEnvOverrides 之前消耗掉它要断言的“已自动规范化”日志。
+            Check("ChildEnv_BlockSizeBoundary_32767Accepted_32768Rejected", ChildEnvBlockSizeBoundary);
         }
 
         // 配置模型用例全部使用绝对临时路径：--selftest 不改变当前目录。
@@ -479,6 +526,118 @@ namespace gostGUI
             AssertEqual(text, EnvBlock.FormatLines(parsed.Overrides));
         }
 
+        // 子进程环境块应用：R12 的 32767+2 守卫与“无覆盖即完全不碰 psi”的纯内存用例，不启动进程。
+
+        /// <summary>
+        /// 当前父环境按 Windows 口径的块大小：每项 key + '=' + value + '\0'，再加结尾两个 '\0'。
+        /// 与 ChildEnvironment 的守卫口径一致（大小写不敏感、同名只留最后一个值）。
+        /// 用例真正钉住的是错误文本与“接受/拒绝”边界；这里的公式只用于把夹具推到边界。
+        /// </summary>
+        private static long ParentEnvironmentBlockSize()
+        {
+            var effective = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+            {
+                string key = Convert.ToString(entry.Key);
+                if (string.IsNullOrEmpty(key))
+                {
+                    continue;
+                }
+
+                effective[key] = Convert.ToString(entry.Value) ?? "";
+            }
+
+            long total = 2;
+            foreach (KeyValuePair<string, string> pair in effective)
+            {
+                total += pair.Key.Length + 1 + pair.Value.Length + 1;
+            }
+
+            return total;
+        }
+
+        /// <summary>
+        /// 直接读取 psi.EnvironmentVariables 在 net48 里的私有懒播种字段，不触发属性 getter：
+        /// 字段为 null 表示 Apply 从未访问/写过它，这是“无覆盖项即不碰 psi”的最强证据。
+        /// 字段名在 net48 固定；取不到时返回 false，由调用用例写 SKIP 记录，而不是静默放过断言。
+        /// </summary>
+        private static bool TryGetStartInfoEnvironment(ProcessStartInfo psi,
+            out System.Collections.Specialized.StringDictionary environment)
+        {
+            environment = null;
+            var field = typeof(ProcessStartInfo).GetField("environmentVariables",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (field == null)
+            {
+                return false;
+            }
+
+            environment = field.GetValue(psi) as System.Collections.Specialized.StringDictionary;
+            return true;
+        }
+
+        private static void ChildEnvTooLargeBlockReturnsChineseError()
+        {
+            // 父环境 + 覆盖项都按“key + '=' + value + '\0'”累计，再加结尾两个 '\0'；把夹具推到 32777。
+            const int overflowBytes = 10;
+            string key = "GOSTGUI_SELFTEST_FAT_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            long parentSize = ParentEnvironmentBlockSize();
+            int valueLength = (int)(32767 + overflowBytes - parentSize - (key.Length + 2));
+            Assert(valueLength > 0, "父环境过大，构造不出超限夹具（父环境块 " + parentSize + " 字节）");
+
+            var psi = new ProcessStartInfo("cmd.exe");
+            var logs = new List<string>();
+            string error;
+            ChildEnvironment.Apply(
+                psi,
+                new[] { new KeyValuePair<string, string>(key, new string('x', valueLength)) },
+                logs.Add,
+                out error);
+
+            Assert(!string.IsNullOrEmpty(error), "环境块超过 32767 时必须返回错误");
+            Assert(ContainsChinese(error), "超限错误应为中文：" + error);
+            Assert(error.Contains("32767"), "超限错误应点名 Windows 上限：" + error);
+            // 守卫在规范化/写入之前：既不应产生 System 日志，也不应碰 psi 与本进程环境。
+            AssertEqual(0, logs.Count);
+            System.Collections.Specialized.StringDictionary psiEnvironment;
+            if (TryGetStartInfoEnvironment(psi, out psiEnvironment))
+            {
+                Assert(psiEnvironment == null, "超限时不应触碰 psi.EnvironmentVariables");
+            }
+            else
+            {
+                Notice("SKIP ChildEnv_TooLargeBlock_ReturnsChineseError 的 psi 未播种断言：找不到 environmentVariables 私有字段");
+            }
+
+            Assert(Environment.GetEnvironmentVariable(key) == null, "超限时不应把覆盖项写进本进程环境：" + key);
+        }
+
+        private static void ChildEnvNoOverridesIsNoOp()
+        {
+            var psi = new ProcessStartInfo("cmd.exe");
+            string key = "GOSTGUI_SELFTEST_NOOP_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            var logs = new List<string>();
+
+            string error;
+            ChildEnvironment.Apply(psi, null, logs.Add, out error);
+            AssertEqual("", error);
+            ChildEnvironment.Apply(psi, new List<KeyValuePair<string, string>>(), logs.Add, out error);
+            AssertEqual("", error);
+
+            AssertEqual(0, logs.Count);
+            System.Collections.Specialized.StringDictionary psiEnvironment;
+            if (TryGetStartInfoEnvironment(psi, out psiEnvironment))
+            {
+                Assert(psiEnvironment == null, "无覆盖项时不应访问 psi.EnvironmentVariables");
+            }
+            else
+            {
+                Notice("SKIP ChildEnv_NoOverrides_IsNoOp 的 psi 未播种断言：找不到 environmentVariables 私有字段");
+            }
+
+            Assert(Environment.GetEnvironmentVariable(key) == null, "无覆盖项时不应写本进程环境：" + key);
+        }
+
         // 程序解析用例的夹具：临时目录 + 指定的空文件（相对路径可以带子目录），只建不跑。
 
         private static string CreateTempDirectoryWithFiles(params string[] relativePaths)
@@ -884,6 +1043,1197 @@ namespace gostGUI
             }
         }
 
+        // 启动管线用例的夹具：配置项 + 空父环境；全部使用绝对路径，临时目录由用例自己清理。
+
+        private static Dictionary<string, string> EmptyEnv()
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static ConfigItem NewLaunchItem(string program, string args = "", string workDir = "",
+            Dictionary<string, string> env = null)
+        {
+            var item = new ConfigItem
+            {
+                Program = program,
+                Args = args,
+                WorkDir = workDir
+            };
+            if (env != null)
+            {
+                item.Env = env;
+            }
+
+            return item;
+        }
+
+        private static void PipelineEmptyProgramReturnsError()
+        {
+            string appDir = CreateTempDirectoryWithFiles();
+            try
+            {
+                foreach (string program in new[] { null, "", "   " })
+                {
+                    LaunchRequest request = LaunchPipeline.Build(NewLaunchItem(program), appDir, EmptyEnv());
+
+                    Assert(request != null, "Build 不应返回 null");
+                    Assert(!string.IsNullOrEmpty(request.Error), "空程序应填入中文错误");
+                    Assert(request.Error.Contains("未设置程序"), "空程序错误应提示未设置程序：" + request.Error);
+                    Assert(string.IsNullOrEmpty(request.FileName), "空程序不应给出启动文件名");
+                    AssertEqual(ChildKind.Executable, request.Kind);
+                    Assert(!request.IsBatch, "空程序不应按批处理包装");
+                    Assert(request.EnvOverrides != null, "失败时 EnvOverrides 也不应为 null");
+                }
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineResolvesAndExpandsWorkDir()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            string runDir = CreateTempDirectory();
+            try
+            {
+                var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "MYDIR", runDir }
+                };
+                ConfigItem item = NewLaunchItem(AbsolutePathOf(appDir, "app.exe"), "-x 1", "%MYDIR%", env);
+
+                LaunchRequest request = LaunchPipeline.Build(item, appDir, EmptyEnv());
+
+                AssertEqual("", request.Error);
+                AssertSamePath(AbsolutePathOf(appDir, "app.exe"), request.FileName);
+                AssertEqual("-x 1", request.Arguments);
+                // 覆盖表里给值的 %MYDIR% 必须展开成覆盖表里的目录。
+                AssertSamePath(runDir, request.WorkingDirectory);
+                AssertEqual(ChildKind.Executable, request.Kind);
+                Assert(!request.IsBatch, "exe 不应按批处理包装");
+                Assert(request.EnvOverrides != null, "EnvOverrides 不应为 null");
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+                DeleteTempDirectory(runDir);
+            }
+        }
+
+        private static void PipelineDefaultWorkDirIsBaseDir()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            try
+            {
+                LaunchRequest request = LaunchPipeline.Build(
+                    NewLaunchItem(AbsolutePathOf(appDir, "app.exe")), appDir, EmptyEnv());
+
+                AssertEqual("", request.Error);
+                AssertSamePath(Path.GetFullPath(appDir), request.WorkingDirectory);
+
+                // WorkDir 为 null 与空字符串等价，同样回落到 baseDir。
+                ConfigItem item = NewLaunchItem(AbsolutePathOf(appDir, "app.exe"));
+                item.WorkDir = null;
+                LaunchRequest nullDir = LaunchPipeline.Build(item, appDir, EmptyEnv());
+
+                AssertEqual("", nullDir.Error);
+                AssertSamePath(Path.GetFullPath(appDir), nullDir.WorkingDirectory);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineMissingWorkDirReturnsError()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            try
+            {
+                string missing = Path.Combine(appDir, "no-such-dir");
+                ConfigItem item = NewLaunchItem(AbsolutePathOf(appDir, "app.exe"), "", missing);
+
+                LaunchRequest request = LaunchPipeline.Build(item, appDir, EmptyEnv());
+
+                Assert(!string.IsNullOrEmpty(request.Error), "工作目录不存在时必须填入错误");
+                AssertEqual("工作目录不存在：" + Path.GetFullPath(missing), request.Error);
+                Assert(string.IsNullOrEmpty(request.WorkingDirectory), "失败时 WorkingDirectory 应为空字符串");
+                Assert(string.IsNullOrEmpty(request.FileName), "工作目录失败时不应给出启动文件名");
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineBatchWrapsWithCmd()
+        {
+            string appDir = CreateTempDirectoryWithFiles(Path.Combine("a b", "x.bat"));
+            try
+            {
+                string bat = AbsolutePathOf(appDir, "a b", "x.bat");
+                string expectedComSpec = Environment.GetEnvironmentVariable("COMSPEC");
+                if (string.IsNullOrEmpty(expectedComSpec))
+                {
+                    expectedComSpec = "cmd.exe";
+                }
+
+                // COMSPEC 现在从父环境快照（有效环境）取，不再读活环境：快照里显式给出才能断言具体路径。
+                var parent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "COMSPEC", expectedComSpec }
+                };
+                LaunchRequest request = LaunchPipeline.Build(NewLaunchItem(bat, "-flag"), appDir, parent);
+
+                AssertEqual("", request.Error);
+                AssertSamePath(expectedComSpec, request.FileName);
+                // 标准 cmd /s /c 形式：整条命令再包一层引号，bat 路径单独加引号。
+                AssertEqual("/d /s /c \"\"" + bat + "\" -flag\"", request.Arguments);
+                AssertEqual(ChildKind.Batch, request.Kind);
+                Assert(request.IsBatch, "Batch 类型的 IsBatch 应为 true");
+                AssertSamePath(Path.GetFullPath(appDir), request.WorkingDirectory);
+
+                // 快照里没有 COMSPEC 时回落到裸名 cmd.exe（不再偷看活环境）。
+                LaunchRequest withoutComSpec = LaunchPipeline.Build(NewLaunchItem(bat, "-flag"), appDir, EmptyEnv());
+                AssertEqual("", withoutComSpec.Error);
+                AssertEqual("cmd.exe", withoutComSpec.FileName);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineKeepsArgsVerbatim()
+        {
+            string appDir = CreateTempDirectoryWithFiles(Path.Combine("dir with space", "app.exe"));
+            try
+            {
+                string exe = AbsolutePathOf(appDir, "dir with space", "app.exe");
+                const string args = "-L \"127.0.0.1:8080\" --header='a b' \"\"";
+                LaunchRequest request = LaunchPipeline.Build(NewLaunchItem(exe, args), appDir, EmptyEnv());
+
+                AssertEqual("", request.Error);
+                AssertSamePath(exe, request.FileName);
+                // 参数原样透传：不加引号、不剥引号、不 Trim。
+                AssertEqual(args, request.Arguments);
+                AssertEqual(ChildKind.Executable, request.Kind);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelinePropagatesEnvOverrides()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            try
+            {
+                var parent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "ROOT", @"C:\root" },
+                    { "PATH", @"C:\windows" }
+                };
+                var overrides = new Dictionary<string, string>
+                {
+                    { "BASE", @"C:\tools" },
+                    { "PATH", @"%BASE%;%ROOT%" },
+                    { "COPY", "%PATH%" }
+                };
+                ConfigItem item = NewLaunchItem(AbsolutePathOf(appDir, "app.exe"), "", "", overrides);
+
+                LaunchRequest request = LaunchPipeline.Build(item, appDir, parent);
+
+                AssertEqual("", request.Error);
+                Assert(request.EnvOverrides != null, "EnvOverrides 不应为 null");
+                // 只带本项覆盖项，父环境不塞进来（启动方自己合并）。
+                AssertEqual(3, request.EnvOverrides.Count);
+                AssertEqual(@"C:\tools;C:\root", request.EnvOverrides["PATH"]);
+                AssertEqual(@"C:\tools;C:\root", request.EnvOverrides["COPY"]);
+                AssertEqual(@"C:\tools", request.EnvOverrides["BASE"]);
+                Assert(!request.EnvOverrides.ContainsKey("ROOT"), "父环境变量不应出现在 EnvOverrides 里");
+                Assert(request.EnvOverrides.ContainsKey("path"), "EnvOverrides 的键应大小写不敏感");
+
+                // 没有任何覆盖项时是空表而不是 null。
+                LaunchRequest plain = LaunchPipeline.Build(
+                    NewLaunchItem(AbsolutePathOf(appDir, "app.exe")), appDir, EmptyEnv());
+                Assert(plain.EnvOverrides != null, "无覆盖项时 EnvOverrides 不应为 null");
+                AssertEqual(0, plain.EnvOverrides.Count);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineWorkDirUsesParentEffectiveEnv()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            string runDir = CreateTempDirectory();
+            try
+            {
+                // 变量来自父环境：有效环境包含父环境 + 覆盖项，所以 workDir 里的 %PARENTDIR% 同样要展开。
+                var parent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "PARENTDIR", runDir }
+                };
+                LaunchRequest request = LaunchPipeline.Build(
+                    NewLaunchItem(AbsolutePathOf(appDir, "app.exe"), "", "%PARENTDIR%"), appDir, parent);
+
+                AssertEqual("", request.Error);
+                AssertSamePath(runDir, request.WorkingDirectory);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+                DeleteTempDirectory(runDir);
+            }
+        }
+
+        private static void PipelineRelativeWorkDirResolvesAgainstBaseDir()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(appDir, "sub run"));
+                LaunchRequest request = LaunchPipeline.Build(
+                    NewLaunchItem(AbsolutePathOf(appDir, "app.exe"), "", Path.Combine("sub run", "nested")),
+                    appDir, EmptyEnv());
+
+                // nested 不存在：错误里应出现按 baseDir 解析后的绝对路径，而不是当前目录。
+                Assert(!string.IsNullOrEmpty(request.Error), "相对路径不存在时应填入错误");
+                AssertEqual("工作目录不存在：" + AbsolutePathOf(appDir, "sub run", "nested"), request.Error);
+
+                LaunchRequest existing = LaunchPipeline.Build(
+                    NewLaunchItem(AbsolutePathOf(appDir, "app.exe"), "", "sub run"), appDir, EmptyEnv());
+                AssertEqual("", existing.Error);
+                AssertSamePath(AbsolutePathOf(appDir, "sub run"), existing.WorkingDirectory);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineMalformedWorkDirDoesNotThrow()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            try
+            {
+                string malformed = appDir + Path.DirectorySeparatorChar + "bad\0dir";
+                LaunchRequest request = LaunchPipeline.Build(
+                    NewLaunchItem(AbsolutePathOf(appDir, "app.exe"), "", malformed), appDir, EmptyEnv());
+
+                Assert(request != null, "Build 不应返回 null");
+                Assert(!string.IsNullOrEmpty(request.Error), "畸形工作目录应填入中文错误");
+                Assert(request.Error.Contains("工作目录"), "错误应说明工作目录无效：" + request.Error);
+                Assert(string.IsNullOrEmpty(request.WorkingDirectory), "失败时 WorkingDirectory 应为空字符串");
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineEnvTooLargeReturnsEnvError()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            try
+            {
+                // 覆盖项本身就超过 32K：错误必须原样从 EnvBlock 传到 LaunchRequest。
+                ConfigItem item = NewLaunchItem(AbsolutePathOf(appDir, "app.exe"), "-x");
+                item.Env = new Dictionary<string, string>
+                {
+                    { "BIG", new string('x', 32765) }
+                };
+
+                string envError;
+                EnvBlock.BuildEffective(EmptyEnv(), item.Env, out envError);
+                Assert(!string.IsNullOrEmpty(envError), "夹具应超过 32K 上限");
+
+                LaunchRequest request = LaunchPipeline.Build(item, appDir, EmptyEnv());
+
+                AssertEqual(envError, request.Error);
+                // 顺序决定：环境先失败时不再解析程序，也不该给出启动文件名。
+                Assert(string.IsNullOrEmpty(request.FileName), "环境块超限时不应解析程序");
+
+                // 父环境已经超限时同样必须失败（不能只在覆盖项上校验）。
+                var bigParent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "BIG", new string('x', 32765) }
+                };
+                string parentError;
+                EnvBlock.BuildEffective(bigParent, EmptyEnv(), out parentError);
+                Assert(!string.IsNullOrEmpty(parentError), "父环境夹具应超过 32K 上限");
+
+                LaunchRequest fromParent = LaunchPipeline.Build(
+                    NewLaunchItem(AbsolutePathOf(appDir, "app.exe")), appDir, bigParent);
+                AssertEqual(parentError, fromParent.Error);
+                Assert(string.IsNullOrEmpty(fromParent.FileName), "父环境超限时不应解析程序");
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineNotFoundUsesR13Message()
+        {
+            string appDir = CreateTempDirectoryWithFiles();
+            string emptyDir = CreateTempDirectoryWithFiles();
+            try
+            {
+                var parent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "PATH", emptyDir }
+                };
+
+                LaunchRequest bare = LaunchPipeline.Build(
+                    NewLaunchItem("definitely-not-a-real-tool-xyz"), appDir, parent);
+
+                Assert(!string.IsNullOrEmpty(bare.Error), "裸名找不到时应填入错误");
+                AssertEqual("在应用目录与有效 PATH 中均未找到 definitely-not-a-real-tool-xyz（共搜索 2 个目录）",
+                    bare.Error);
+                Assert(string.IsNullOrEmpty(bare.FileName), "找不到时不应给出启动文件名");
+
+                // 显式路径未命中：沿用解析器原文（已经点名了路径），不能改写成 PATH 措辞。
+                string explicitPath = Path.Combine(appDir, "missing", "nope.exe");
+                LaunchRequest explicitRequest = LaunchPipeline.Build(
+                    NewLaunchItem(explicitPath), appDir, parent);
+
+                Assert(!string.IsNullOrEmpty(explicitRequest.Error), "显式路径不存在时应填入错误");
+                Assert(explicitRequest.Error.Contains("未找到程序："),
+                    "显式路径错误应沿用解析器原文：" + explicitRequest.Error);
+                Assert(explicitRequest.Error.Contains(explicitPath),
+                    "解析器错误应点名完整路径：" + explicitRequest.Error);
+                Assert(!explicitRequest.Error.StartsWith("在应用目录与有效 PATH 中均未找到"),
+                    "显式路径不应套用 PATH 措辞：" + explicitRequest.Error);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+                DeleteTempDirectory(emptyDir);
+            }
+        }
+
+        private static void PipelineBatchWithEmptyArgsWrapsWithTrailingQuotes()
+        {
+            string appDir = CreateTempDirectoryWithFiles(Path.Combine("a b", "x.bat"));
+            try
+            {
+                string bat = AbsolutePathOf(appDir, "a b", "x.bat");
+
+                LaunchRequest request = LaunchPipeline.Build(NewLaunchItem(bat, ""), appDir, EmptyEnv());
+                AssertEqual("", request.Error);
+                // 空参数时结尾只剩两层引号：/d /s /c ""<path>""。
+                AssertEqual("/d /s /c \"\"" + bat + "\"\"", request.Arguments);
+                Assert(request.IsBatch, "空参数的 bat 仍应按批处理包装");
+
+                // Args 为 null 与空字符串等价。
+                LaunchRequest nullArgs = LaunchPipeline.Build(NewLaunchItem(bat, null), appDir, EmptyEnv());
+                AssertEqual("", nullArgs.Error);
+                AssertEqual("/d /s /c \"\"" + bat + "\"\"", nullArgs.Arguments);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        // R14：批处理路径含空格、参数含引号时的包装串必须逐字符正确；WorkDir = null 必须被容忍。
+
+        private static void PipelineBatchWithSpacesAndQuotedArgsExactWrapper()
+        {
+            string appDir = CreateTempDirectoryWithFiles(Path.Combine("a b", "x.bat"));
+            try
+            {
+                string bat = AbsolutePathOf(appDir, "a b", "x.bat");
+                LaunchRequest request = LaunchPipeline.Build(NewLaunchItem(bat, "-x \"a b\""), appDir, EmptyEnv());
+
+                AssertEqual("", request.Error);
+                // 含空格路径 + 含引号参数：整条命令再包一层引号，用户参数原样拼接。
+                AssertEqual("/d /s /c \"\"" + bat + "\" -x \"a b\"\"", request.Arguments);
+                Assert(request.IsBatch, "含空格的 .bat 仍应按批处理包装");
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        private static void PipelineNullWorkDirIsTolerated()
+        {
+            string appDir = CreateTempDirectoryWithFiles("app.exe");
+            try
+            {
+                ConfigItem item = NewLaunchItem(AbsolutePathOf(appDir, "app.exe"));
+                item.WorkDir = null;
+
+                LaunchRequest request = LaunchPipeline.Build(item, appDir, EmptyEnv());
+
+                AssertEqual("", request.Error);
+                AssertSamePath(Path.GetFullPath(appDir), request.WorkingDirectory);
+            }
+            finally
+            {
+                DeleteTempDirectory(appDir);
+            }
+        }
+
+        // IPC 契约用例的夹具：只构造内存里的绝对路径与流，绝不碰文件系统、绝不启动进程。
+
+        private static LaunchSpec NewSpec()
+        {
+            string nonce = Guid.NewGuid().ToString("N");
+            string appDir = Path.Combine(Path.GetTempPath(), "gostgui-spec");
+            return new LaunchSpec
+            {
+                V = 1,
+                Nonce = nonce,
+                Pipe = "gostgui." + nonce,
+                Program = Path.Combine(appDir, "gost.exe"),
+                Arguments = "-L 127.0.0.1:8080",
+                WorkingDirectory = appDir,
+                Kind = ChildKind.Executable,
+                EnvOverrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "GOST_LOG", "debug" },
+                    { "Path", @"C:\tools" },
+                    { "中文键", "中文值" }
+                },
+                RequestedAdmin = false
+            };
+        }
+
+        private static void AssertSpecEqual(LaunchSpec expected, LaunchSpec actual)
+        {
+            Assert(actual != null, "反序列化结果不应为 null");
+            AssertEqual(expected.V, actual.V);
+            AssertEqual(expected.Nonce, actual.Nonce);
+            AssertEqual(expected.Pipe, actual.Pipe);
+            AssertEqual(expected.Program, actual.Program);
+            AssertEqual(expected.Arguments, actual.Arguments);
+            AssertEqual(expected.WorkingDirectory, actual.WorkingDirectory);
+            AssertEqual(expected.Kind, actual.Kind);
+            AssertEqual(expected.RequestedAdmin, actual.RequestedAdmin);
+            Assert(actual.EnvOverrides != null, "EnvOverrides 不应为 null");
+            AssertEqual(expected.EnvOverrides.Count, actual.EnvOverrides.Count);
+            foreach (KeyValuePair<string, string> pair in expected.EnvOverrides)
+            {
+                Assert(actual.EnvOverrides.ContainsKey(pair.Key), "反序列化后缺少环境变量：" + pair.Key);
+                AssertEqual(pair.Value, actual.EnvOverrides[pair.Key]);
+            }
+        }
+
+        /// <summary>把一条消息写进内存流，返回原始帧文本（含结尾换行，便于断言帧形态与多帧拼接）。</summary>
+        private static string FrameText(IpcMessage message)
+        {
+            using (var stream = new MemoryStream())
+            {
+                IpcFraming.Write(stream, message);
+                return new UTF8Encoding(false, true).GetString(stream.ToArray());
+            }
+        }
+
+        private static StreamReader ReaderOver(string text)
+        {
+            return new StreamReader(
+                new MemoryStream(new UTF8Encoding(false).GetBytes(text)),
+                new UTF8Encoding(false, true));
+        }
+
+        private static int CountChar(string text, char value)
+        {
+            int count = 0;
+            foreach (char c in text)
+            {
+                if (c == value)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        /// <summary>异常消息必须是中文：非法输入只允许得到中文的 FormatException/ArgumentException，绝不允许 NRE。</summary>
+        private static void AssertMalformedInputRejected(Action body, string what)
+        {
+            Exception captured = null;
+            try
+            {
+                body();
+            }
+            catch (Exception ex)
+            {
+                captured = ex;
+            }
+
+            Assert(captured != null, what + " 应抛出异常，而不是被静默接受");
+            Assert(captured is FormatException || captured is ArgumentException,
+                what + " 应抛出 FormatException 或 ArgumentException，实际 " + captured.GetType().Name + ": " + captured.Message);
+            Assert(ContainsChinese(captured.Message), what + " 的异常消息应为中文：" + captured.Message);
+        }
+
+        private static bool ContainsChinese(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return false;
+            }
+
+            foreach (char c in text)
+            {
+                if (c >= '\u4e00' && c <= '\u9fff')
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>记录 Flush 次数的内存流：Write 必须对调用方流 Flush，保证对端立刻可读。</summary>
+        private sealed class FlushCountingStream : MemoryStream
+        {
+            public int FlushCount;
+
+            public override void Flush()
+            {
+                FlushCount++;
+                base.Flush();
+            }
+        }
+
+        private static void SpecBase64RoundTrip()
+        {
+            LaunchSpec spec = NewSpec();
+            string base64 = LaunchSpecCodec.ToBase64(spec);
+
+            Assert(!string.IsNullOrEmpty(base64), "Base64 不应为空");
+            Assert(base64.IndexOf(' ') < 0, "标准 Base64 不应包含空格，可直接塞进 lpParameters");
+
+            byte[] bytes = Convert.FromBase64String(base64);
+            string json = new UTF8Encoding(false, true).GetString(bytes);
+            Assert(json.Length > 0 && json[0] == '{', "Base64 解出的应是 JSON 对象：" + json);
+            Assert(json.Contains("\"nonce\""), "JSON 必须使用短字段名 nonce：" + json);
+            Assert(json.Contains("\"kind\":\"exe\""), "Kind 必须序列化成 \"exe\"：" + json);
+
+            LaunchSpec back = LaunchSpecCodec.FromBase64(base64);
+            AssertSpecEqual(spec, back);
+            Assert(back.EnvOverrides.ContainsKey("path"), "反序列化后的 EnvOverrides 必须大小写不敏感");
+            AssertEqual("debug", back.EnvOverrides["gost_log"]);
+            // 保留 JSON 里的键顺序，供 %VAR% 展开等按出现顺序处理。
+            AssertEqual("GOST_LOG", new List<string>(back.EnvOverrides.Keys)[0]);
+        }
+
+        private static void SpecNeedsTempFileWhenTooLong()
+        {
+            AssertEqual(8000, LaunchSpecCodec.CommandLineLimit);
+
+            // Base64 长度只能是 4 的倍数：先找到恰好等于上限的那一档，再加一个字符。
+            LaunchSpec spec = NewSpec();
+            int argsLength = 4000;
+            while (true)
+            {
+                spec.Arguments = new string('x', argsLength);
+                if (LaunchSpecCodec.ToBase64(spec).Length == LaunchSpecCodec.CommandLineLimit)
+                {
+                    spec.Arguments = new string('x', argsLength + 1);
+                    if (LaunchSpecCodec.ToBase64(spec).Length > LaunchSpecCodec.CommandLineLimit)
+                    {
+                        break;
+                    }
+                }
+
+                argsLength++;
+                Assert(argsLength < 10000, "未能构造出恰好 8000 字符 Base64 的用例夹具");
+            }
+
+            spec.Arguments = new string('x', argsLength);
+            AssertEqual(8000, LaunchSpecCodec.ToBase64(spec).Length);
+            Assert(!LaunchSpecCodec.NeedsTempFile(spec), "Base64 恰好 8000 字符时不应改用临时文件");
+
+            spec.Arguments = new string('x', argsLength + 1);
+            AssertEqual(8004, LaunchSpecCodec.ToBase64(spec).Length);
+            Assert(LaunchSpecCodec.NeedsTempFile(spec), "Base64 超过 8000 字符时必须改用临时文件");
+
+            spec.Arguments = new string('x', 60000);
+            Assert(LaunchSpecCodec.NeedsTempFile(spec), "超长参数必须改用临时文件");
+        }
+
+        private static void SpecJsonRoundTripPreservesChineseAndQuotes()
+        {
+            LaunchSpec spec = NewSpec();
+            spec.Program = Path.Combine(Path.GetTempPath(), "工具 目录", "gost.exe");
+            spec.Arguments = "-L \"127.0.0.1:8080\" --tag \"含中文与\\反斜杠\"";
+            spec.WorkingDirectory = Path.Combine(Path.GetTempPath(), "工作 目录");
+            spec.Kind = ChildKind.Batch;
+            spec.RequestedAdmin = true;
+            spec.EnvOverrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "PATH", @"C:\工具;%PATH%" },
+                { "引号键", "值里有\"引号\"和\\反斜杠" }
+            };
+
+            string json = LaunchSpecCodec.ToJson(spec);
+            Assert(json.Contains("中文"), "中文必须原样保留，不能转义成 \\uXXXX：" + json);
+            Assert(!json.Contains("\\u4e2d"), "中文不应被转义成 \\uXXXX：" + json);
+            Assert(json.Contains("\"kind\":\"batch\""), "Kind 必须序列化成 \"batch\"：" + json);
+
+            LaunchSpec back = LaunchSpecCodec.FromJson(json);
+            AssertSpecEqual(spec, back);
+            AssertEqual(ChildKind.Batch, back.Kind);
+            Assert(back.EnvOverrides.ContainsKey("path"), "反序列化后的 EnvOverrides 必须大小写不敏感");
+        }
+
+        private static void SpecFromBase64MalformedThrowsChinese()
+        {
+            AssertMalformedInputRejected(() => LaunchSpecCodec.FromBase64(null), "null Base64");
+            AssertMalformedInputRejected(() => LaunchSpecCodec.FromBase64(""), "空 Base64");
+            AssertMalformedInputRejected(() => LaunchSpecCodec.FromBase64("   "), "纯空白 Base64");
+            AssertMalformedInputRejected(() => LaunchSpecCodec.FromBase64("这不是 base64!!!"), "非法 Base64 字符");
+            AssertMalformedInputRejected(
+                () => LaunchSpecCodec.FromBase64(Convert.ToBase64String(Encoding.UTF8.GetBytes("{\"v\":1"))),
+                "截断的 JSON");
+            AssertMalformedInputRejected(
+                () => LaunchSpecCodec.FromBase64(Convert.ToBase64String(new byte[] { 0xFF, 0xFE, 0xFD })),
+                "非法 UTF-8 字节");
+            AssertMalformedInputRejected(() => LaunchSpecCodec.FromJson(null), "null JSON");
+            AssertMalformedInputRejected(() => LaunchSpecCodec.FromJson("{"), "畸形 JSON");
+            AssertMalformedInputRejected(() => LaunchSpecCodec.FromJson("{\"kind\":\"weird\"}"), "未知 kind");
+            AssertMalformedInputRejected(() => LaunchSpecCodec.FromJson("null"), "JSON null");
+        }
+
+        private static void IpcFrameRoundTripEscapesNewlineTabQuoteBackslash()
+        {
+            var message = new IpcMessage
+            {
+                Type = "out",
+                Nonce = Guid.NewGuid().ToString("N"),
+                Pid = 4321,
+                Stream = "o",
+                Data = "a\tb\n\"c\"\\d"
+            };
+
+            using (var stream = new FlushCountingStream())
+            {
+                IpcFraming.Write(stream, message);
+                Assert(stream.FlushCount >= 1, "Write 必须 Flush，保证对端能立刻读到");
+
+                string text = new UTF8Encoding(false, true).GetString(stream.ToArray());
+                Assert(text.EndsWith("\n", StringComparison.Ordinal), "一帧必须以 \\n 结尾");
+                // 帧内只能有结尾这一个原始换行；\t / \n / " / \ 必须走 JSON 转义。
+                AssertEqual(1, CountChar(text, '\n'));
+                AssertEqual(0, CountChar(text, '\r'));
+                AssertEqual(0, CountChar(text, '\t'));
+                Assert(text.Contains("\\t"), "制表符必须转义成 \\t：" + text);
+                Assert(text.Contains("\\n"), "换行必须转义成 \\n：" + text);
+                Assert(text.Contains("\\\""), "双引号必须转义：" + text);
+                Assert(text.Contains("\\\\"), "反斜杠必须转义：" + text);
+
+                stream.Position = 0;
+                using (var reader = new StreamReader(stream, new UTF8Encoding(false, true)))
+                {
+                    IpcMessage back = IpcFraming.Read(reader);
+                    Assert(back != null, "应读回一帧");
+                    AssertEqual("out", back.Type);
+                    AssertEqual(message.Nonce, back.Nonce);
+                    AssertEqual(4321, back.Pid);
+                    AssertEqual("o", back.Stream);
+                    AssertEqual(message.Data, back.Data);
+                }
+            }
+        }
+
+        private static void IpcFrameRoundTripChineseAndEmptyString()
+        {
+            var chinese = new IpcMessage { Type = "out", Stream = "e", Data = "中文输出：你好，世界" };
+            var empty = new IpcMessage { Type = "ready", Nonce = "n-1", Data = "" };
+            var nullData = new IpcMessage { Type = "stop" };
+
+            string chineseLine = FrameText(chinese);
+            string emptyLine = FrameText(empty);
+            string nullLine = FrameText(nullData);
+
+            Assert(chineseLine.Contains("中文输出：你好，世界"), "中文应原样出现在帧里：" + chineseLine);
+            Assert(emptyLine.Contains("\"d\":\"\""), "空字符串必须写成 \"d\":\"\"，不能当成 null 省略：" + emptyLine);
+            Assert(!nullLine.Contains("\"d\""), "null 的 Data 必须省略：" + nullLine);
+
+            using (StreamReader reader = ReaderOver(chineseLine + emptyLine + nullLine))
+            {
+                IpcMessage first = IpcFraming.Read(reader);
+                AssertEqual("中文输出：你好，世界", first.Data);
+                AssertEqual("e", first.Stream);
+
+                IpcMessage second = IpcFraming.Read(reader);
+                AssertEqual("", second.Data);
+                Assert(second.Data != null, "空字符串不能变成 null");
+
+                IpcMessage third = IpcFraming.Read(reader);
+                AssertEqual("stop", third.Type);
+                Assert(third.Data == null, "省略的 Data 读回应为 null");
+                Assert(third.Stream == null, "省略的 Stream 读回应为 null");
+
+                Assert(IpcFraming.Read(reader) == null, "三帧读完后必须返回 null");
+            }
+        }
+
+        private static void IpcReadReturnsNullAtEof()
+        {
+            using (StreamReader reader = ReaderOver(""))
+            {
+                Assert(IpcFraming.Read(reader) == null, "空流必须返回 null");
+            }
+
+            // 只有空行的流不是消息：跳过空白后仍是文件尾。
+            using (StreamReader reader = ReaderOver("\r\n\n   \n"))
+            {
+                Assert(IpcFraming.Read(reader) == null, "空行不是消息，读到文件尾必须返回 null");
+            }
+
+            // 读完最后一帧之后再读一次同样是 null，而不是抛异常。
+            string line = FrameText(new IpcMessage { Type = "exit", ExitCode = 0 });
+            using (StreamReader reader = ReaderOver(line))
+            {
+                IpcMessage message = IpcFraming.Read(reader);
+                AssertEqual("exit", message.Type);
+                AssertEqual(0, message.ExitCode);
+                Assert(IpcFraming.Read(reader) == null, "读完最后一帧后必须返回 null");
+            }
+        }
+
+        private static void IpcReadMalformedJsonThrowsChinese()
+        {
+            using (StreamReader reader = ReaderOver("{not json}\n"))
+            {
+                AssertMalformedInputRejected(() => IpcFraming.Read(reader), "畸形 JSON 帧");
+            }
+
+            using (StreamReader reader = ReaderOver("{\"t\":\"out\"\n"))
+            {
+                AssertMalformedInputRejected(() => IpcFraming.Read(reader), "截断的 JSON 帧");
+            }
+        }
+
+        // 直连启动用例的夹具：只拉起 cmd /d /s /c，显式路径不依赖 PATH 解析。
+
+        private const int DirectWaitTimeoutMs = 10000;
+
+        private static string CmdPath()
+        {
+            string comspec = Environment.GetEnvironmentVariable("COMSPEC");
+            if (string.IsNullOrEmpty(comspec))
+            {
+                comspec = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+            }
+
+            return comspec;
+        }
+
+        private static ConfigItem NewDirectItem(string args, string workDir = "")
+        {
+            return new ConfigItem
+            {
+                Program = CmdPath(),
+                Args = args,
+                WorkDir = workDir
+            };
+        }
+
+        /// <summary>轮询等待条件成立；任何等待都不得超过 10s，直连用例不允许无限挂起。</summary>
+        private static bool WaitUntil(Func<bool> condition, int timeoutMs)
+        {
+            if (condition == null)
+            {
+                return false;
+            }
+
+            int waited = 0;
+            while (waited < timeoutMs)
+            {
+                if (condition())
+                {
+                    return true;
+                }
+
+                System.Threading.Thread.Sleep(25);
+                waited += 25;
+            }
+
+            return condition();
+        }
+
+        /// <summary>线程安全地收集 ProcessManager 事件，供直连用例断言。</summary>
+        private sealed class DirectRun
+        {
+            private readonly object _gate = new object();
+            private readonly List<KeyValuePair<LogKind, string>> _output = new List<KeyValuePair<LogKind, string>>();
+            private bool _exited;
+            private int _exitCode = int.MinValue;
+
+            public void Attach(ProcessManager manager)
+            {
+                manager.OutputReceived += OnOutput;
+                manager.ProcessExited += OnExited;
+            }
+
+            public bool Exited
+            {
+                get { lock (_gate) { return _exited; } }
+            }
+
+            public int ExitCode
+            {
+                get { lock (_gate) { return _exitCode; } }
+            }
+
+            public bool HasOutput(LogKind kind, string fragment)
+            {
+                return HasOutput(kind, data => data.Contains(fragment));
+            }
+
+            public bool HasOutput(LogKind kind, Func<string, bool> predicate)
+            {
+                lock (_gate)
+                {
+                    foreach (KeyValuePair<LogKind, string> pair in _output)
+                    {
+                        if (pair.Key == kind && pair.Value != null && predicate(pair.Value))
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                }
+            }
+
+            public int CountOutput(LogKind kind, string fragment)
+            {
+                lock (_gate)
+                {
+                    int count = 0;
+                    foreach (KeyValuePair<LogKind, string> pair in _output)
+                    {
+                        if (pair.Key == kind && pair.Value != null && pair.Value.Contains(fragment))
+                        {
+                            count++;
+                        }
+                    }
+
+                    return count;
+                }
+            }
+
+            /// <summary>失败时的诊断文本：把收到的输出按类别拼起来。</summary>
+            public string Describe()
+            {
+                lock (_gate)
+                {
+                    var builder = new StringBuilder();
+                    foreach (KeyValuePair<LogKind, string> pair in _output)
+                    {
+                        builder.Append('[').Append(pair.Key).Append("] ")
+                            .Append((pair.Value ?? "").Trim()).Append(" | ");
+                    }
+
+                    if (_exited)
+                    {
+                        builder.Append("exit=").Append(_exitCode);
+                    }
+
+                    return builder.Length == 0 ? "（没有收到任何输出）" : builder.ToString();
+                }
+            }
+
+            private void OnOutput(ConfigItem item, LogKind kind, string data)
+            {
+                lock (_gate)
+                {
+                    _output.Add(new KeyValuePair<LogKind, string>(kind, data));
+                }
+            }
+
+            private void OnExited(ConfigItem item, int exitCode)
+            {
+                lock (_gate)
+                {
+                    _exited = true;
+                    _exitCode = exitCode;
+                }
+            }
+        }
+
+        private static void DirectCapturesStdoutAndStderr()
+        {
+            using (ProcessManager manager = new ProcessManager())
+            {
+                DirectRun run = new DirectRun();
+                run.Attach(manager);
+                ConfigItem item = NewDirectItem("/d /s /c \"echo out& echo err 1>&2\"");
+
+                Assert(manager.StartProcess(item), "cmd 子进程应启动成功");
+                Assert(WaitUntil(() => run.CountOutput(LogKind.Stdout, "out") == 1, DirectWaitTimeoutMs),
+                    "应收到恰好一行 stdout：" + run.Describe());
+                Assert(WaitUntil(() => run.CountOutput(LogKind.Stderr, "err") == 1, DirectWaitTimeoutMs),
+                    "应收到恰好一行 stderr：" + run.Describe());
+                // 两类输出不能串台。
+                AssertEqual(0, run.CountOutput(LogKind.Stdout, "err"));
+                AssertEqual(0, run.CountOutput(LogKind.Stderr, "out"));
+            }
+        }
+
+        private static void DirectReportsExitCode()
+        {
+            using (ProcessManager manager = new ProcessManager())
+            {
+                DirectRun run = new DirectRun();
+                run.Attach(manager);
+                ConfigItem item = NewDirectItem("/d /s /c \"exit 7\"");
+
+                Assert(manager.StartProcess(item), "cmd 子进程应启动成功");
+                Assert(WaitUntil(() => run.Exited, DirectWaitTimeoutMs), "应收到退出事件：" + run.Describe());
+                AssertEqual(7, run.ExitCode);
+                Assert(!manager.IsProcessRunning(item), "退出后不应仍在运行");
+                AssertEqual(0, manager.GetChildPid(item));
+            }
+        }
+
+        private static void DirectAppliesEnvOverrides()
+        {
+            bool hadDuplicates = HasDuplicateProcessEnvironmentKeys();
+            string key = "GOSTGUI_SELFTEST_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            string value = "gostgui-" + Guid.NewGuid().ToString("N");
+            using (ProcessManager manager = new ProcessManager())
+            {
+                DirectRun run = new DirectRun();
+                run.Attach(manager);
+                ConfigItem item = NewDirectItem("/d /s /c \"echo %" + key + "%\"");
+                item.Env = new Dictionary<string, string> { { key, value } };
+
+                Assert(manager.StartProcess(item), "cmd 子进程应启动成功");
+                Assert(WaitUntil(() => run.HasOutput(LogKind.Stdout, value), DirectWaitTimeoutMs),
+                    "子进程应看到覆盖后的 " + key + "：" + run.Describe());
+                // 覆盖只属于子进程：无论走 psi 环境字典还是临时环境兜底，都不能留在本进程环境里。
+                Assert(Environment.GetEnvironmentVariable(key) == null,
+                    "启动后本进程环境必须恢复，不能残留 " + key);
+
+                // 本机父环境带大小写重名变量时，第一次 env 覆盖启动必须先规范化并记一条 System 日志。
+                if (hadDuplicates)
+                {
+                    Assert(WaitUntil(() => run.HasOutput(LogKind.System, "已自动规范化"), DirectWaitTimeoutMs),
+                        "重名父环境应先规范化并记录 System 日志：" + run.Describe());
+                    Assert(!run.HasOutput(LogKind.System, "规范化未完成"),
+                        "父环境规范化不应失败：" + run.Describe());
+                }
+            }
+        }
+
+        private static bool HasDuplicateProcessEnvironmentKeys()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+            {
+                string key = Convert.ToString(entry.Key);
+                if (key.Length == 0)
+                {
+                    continue;
+                }
+
+                if (!seen.Add(key))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void DirectUsesWorkingDirectory()
+        {
+            string workDir = CreateTempDirectory();
+            try
+            {
+                using (ProcessManager manager = new ProcessManager())
+                {
+                    DirectRun run = new DirectRun();
+                    run.Attach(manager);
+                    ConfigItem item = NewDirectItem("/d /s /c \"cd\"", workDir);
+
+                    Assert(manager.StartProcess(item), "cmd 子进程应启动成功");
+                    string expected = Path.GetFullPath(workDir);
+                    Assert(WaitUntil(() => run.HasOutput(LogKind.Stdout,
+                            line => string.Equals(line.Trim(), expected, StringComparison.OrdinalIgnoreCase)),
+                        DirectWaitTimeoutMs),
+                        "子进程的工作目录应为 " + expected + "：" + run.Describe());
+                }
+            }
+            finally
+            {
+                DeleteTempDirectory(workDir);
+            }
+        }
+
+        private static void DirectMissingProgramSetsErrorAndDoesNotStart()
+        {
+            using (ProcessManager manager = new ProcessManager())
+            {
+                DirectRun run = new DirectRun();
+                run.Attach(manager);
+                ConfigItem item = new ConfigItem { Program = "" };
+
+                Assert(!manager.StartProcess(item), "空程序不应启动");
+                Assert(!manager.IsProcessRunning(item), "启动失败后状态必须是未运行");
+                AssertEqual(0, manager.GetChildPid(item));
+                Assert(WaitUntil(() => run.HasOutput(LogKind.System, "未设置程序"), DirectWaitTimeoutMs),
+                    "应输出 System 级的失败原因：" + run.Describe());
+            }
+        }
+
+        private static void DirectNonexistentFileReturnsFalseWithoutThrowing()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string missing = Path.Combine(dir, "no-such-program.exe");
+                using (ProcessManager manager = new ProcessManager())
+                {
+                    DirectRun run = new DirectRun();
+                    run.Attach(manager);
+                    ConfigItem item = new ConfigItem { Program = missing };
+
+                    // 关键：这条路径只能返回 false，绝不能把异常抛给界面线程。
+                    bool started = manager.StartProcess(item);
+
+                    Assert(!started, "不存在的程序不应启动");
+                    Assert(!manager.IsProcessRunning(item), "启动失败后状态必须是未运行");
+                    AssertEqual(0, manager.GetChildPid(item));
+                    Assert(WaitUntil(() => run.HasOutput(LogKind.System, "未找到程序"), DirectWaitTimeoutMs),
+                        "应输出 System 级的失败原因：" + run.Describe());
+                }
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        private static void DirectGetChildPidIsLiveThenZero()
+        {
+            using (ProcessManager manager = new ProcessManager())
+            {
+                ConfigItem item = NewDirectItem("/d /s /c \"ping -n 30 127.0.0.1 >nul\"");
+
+                Assert(manager.StartProcess(item), "cmd 子进程应启动成功");
+                try
+                {
+                    Assert(WaitUntil(() => manager.GetChildPid(item) > 0, DirectWaitTimeoutMs),
+                        "运行中应返回子进程 PID");
+                    Assert(manager.IsProcessRunning(item), "运行中 IsProcessRunning 应为 true");
+                }
+                finally
+                {
+                    manager.StopProcess(item);
+                }
+
+                Assert(!manager.IsProcessRunning(item), "停止后不应仍在运行");
+                AssertEqual(0, manager.GetChildPid(item));
+            }
+        }
+
+        private static void DirectElevationRequiredIsDetected()
+        {
+            string msconfig = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System), "msconfig.exe");
+            if (!File.Exists(msconfig))
+            {
+                Notice("SKIP Direct_ElevationRequired_IsDetected：找不到 msconfig.exe 夹具");
+                return;
+            }
+
+            if (IsProcessElevated())
+            {
+                Notice("SKIP Direct_ElevationRequired_IsDetected：本进程已提权，无法制造 Win32 740");
+                return;
+            }
+
+            using (ProcessManager manager = new ProcessManager())
+            {
+                DirectRun run = new DirectRun();
+                run.Attach(manager);
+                // msconfig.exe 的清单要求 requireAdministrator：标准权限下 CreateProcess 直接返回 740，不弹 UAC。
+                ConfigItem item = new ConfigItem { Program = msconfig };
+
+                Assert(!manager.StartProcess(item), "需要管理员权限的程序在标准权限下不应启动");
+                Assert(manager.LastStartErrorIsElevationRequired, "应标记为需要管理员权限（Win32 740）");
+                Assert(!manager.IsProcessRunning(item), "启动失败后状态必须是未运行");
+                AssertEqual(0, manager.GetChildPid(item));
+                Assert(WaitUntil(() => run.HasOutput(LogKind.System, "管理员"), DirectWaitTimeoutMs),
+                    "System 日志应说明需要管理员权限：" + run.Describe());
+                Assert(run.HasOutput(LogKind.System, "740"),
+                    "System 日志应带上 Windows 错误码 740：" + run.Describe());
+            }
+        }
+
+        private static bool IsProcessElevated()
+        {
+            try
+            {
+                using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
+                {
+                    var principal = new System.Security.Principal.WindowsPrincipal(identity);
+                    return principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+                }
+            }
+            catch (Exception)
+            {
+                // 判断不了提权状态时按未提权处理：若真提权了，elevation 用例会在断言处明确失败。
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// R12 的 `&gt;` 比较边界：环境块恰好 32767 字节必须接受，32768 字节必须拒绝。
+        /// 先跑拒绝分支（守卫不触发规范化），再用同一父环境口径跑接受分支（它才会触发一次性规范化）。
+        /// </summary>
+        private static void ChildEnvBlockSizeBoundary()
+        {
+            const int limit = 32767;
+            string key = "GOSTGUI_SELFTEST_BOUNDARY_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            long parentSize = ParentEnvironmentBlockSize();
+            int atLimitLength = (int)(limit - parentSize - (key.Length + 2));
+            Assert(atLimitLength > 0, "父环境过大，构造不出 32767 边界夹具（父环境块 " + parentSize + " 字节）");
+
+            // 32768：拒绝，错误文本应报告真实大小与上限；守卫在规范化之前，不应产生日志。
+            var tooBigPsi = new ProcessStartInfo("cmd.exe");
+            var tooBigLogs = new List<string>();
+            string error;
+            ChildEnvironment.Apply(tooBigPsi,
+                new[] { new KeyValuePair<string, string>(key, new string('x', atLimitLength + 1)) },
+                tooBigLogs.Add, out error);
+            Assert(!string.IsNullOrEmpty(error), "32768 字节必须被拒绝");
+            Assert(error.Contains("32768"), "错误信息应报告实际大小 32768：" + error);
+            Assert(error.Contains("32767"), "错误信息应点名上限 32767：" + error);
+            AssertEqual(0, tooBigLogs.Count);
+
+            // 恰好 32767：接受（error 为空）。本分支会触发一次性的父环境规范化，所以用例登记在 Direct 之后。
+            var atLimitPsi = new ProcessStartInfo("cmd.exe");
+            var atLimitLogs = new List<string>();
+            ChildEnvironment.Apply(atLimitPsi,
+                new[] { new KeyValuePair<string, string>(key, new string('x', atLimitLength)) },
+                atLimitLogs.Add, out error);
+            AssertEqual("", error);
+        }
+
+        /// <summary>夹具缺失/环境不满足时跳过用例，并把跳过原因写进 selftest 结果与控制台。</summary>
+        private static void Notice(string message)
+        {
+            Notices.Add(message);
+        }
+
         public static void Check(string name, Action body)
         {
             if (name == null) throw new ArgumentNullException(nameof(name));
@@ -946,6 +2296,11 @@ namespace gostGUI
                     failed++;
                     WriteLine(log, console, "FAIL " + testCase.Name + ": " + DescribeFailure(ex));
                 }
+            }
+
+            foreach (string notice in Notices)
+            {
+                WriteLine(log, console, notice);
             }
 
             WriteLine(log, console, $"共 {Cases.Count} 个用例，失败 {failed} 个");
