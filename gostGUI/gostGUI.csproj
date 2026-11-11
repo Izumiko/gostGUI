@@ -14,6 +14,8 @@
     <TargetFrameworkProfile />
     <RuntimeIdentifiers>win</RuntimeIdentifiers>
     <LangVersion>latest</LangVersion>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -72,6 +74,8 @@
   <ItemGroup>
     <Compile Include="Common.cs" />
     <Compile Include="SelfTest.cs" />
+    <Compile Include="ProgramResolver.cs" />
+    <Compile Include="Theme\ThemeMode.cs" />
     <Compile Include="Shared\*.cs" />
     <Compile Include="FormMain.cs">
       <SubType>Form</SubType>
@@ -102,6 +106,7 @@
     <None Include="config.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="app.config" />
     <None Include="Properties\Settings.settings">
       <Generator>SettingsSingleFileGenerator</Generator>
       <LastGenOutput>Settings.Designer.cs</LastGenOutput>

@@ -13,6 +13,9 @@ namespace gostGUI
 
         public IReadOnlyList<ConfigItem> Items => _configData.Items.AsReadOnly();
 
+        /// <summary>上次加载失败的原因（中文）；加载成功时为空字符串。</summary>
+        public string LoadError { get; private set; }
+
         public event Action<ConfigItem> ItemAdded;
         public event Action<ConfigItem, string> ItemRenamed;
         public event Action<ConfigItem> ItemDeleted;
@@ -26,12 +29,14 @@ namespace gostGUI
 
         private void Load()
         {
-            Common.LoadJson(_configFilePath, out _configData);
+            ConfigLoadResult result = Common.LoadFrom(_configFilePath);
+            _configData = result.Data ?? new ConfigData();
+            LoadError = result.Ok ? "" : (result.Error ?? "");
         }
 
         public void Save()
         {
-            Common.SaveToFile(_configData, _configFilePath);
+            Common.SaveTo(_configData, _configFilePath);
         }
 
         public ConfigItem AddNewItem()
