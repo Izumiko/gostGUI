@@ -85,10 +85,10 @@
     <Compile Include="FormMain.Designer.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
     </Compile>
-    <Compile Include="jobobjectmanage.cs" />
     <Compile Include="LogViewManager.cs" />
     <Compile Include="ConfigurationManager.cs" />
     <Compile Include="ProcessManager.cs" />
+    <Compile Include="RunnerClient.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <EmbeddedResource Include="FormMain.resx">
@@ -122,5 +122,23 @@
   <ItemGroup>
     <Content Include="smile-full.ico" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- 只建立“先构建 runner，再构建 UI”的顺序依赖：CopyRunnerToOutput 才能复制到最新 exe。
+         ReferenceOutputAssembly=false + Private=false 表示不引用它的程序集、也不把它当依赖 dll 复制。 -->
+    <ProjectReference Include="..\gostGUI.Runner\gostGUI.Runner.csproj">
+      <Project>{DDB7BFEB-0141-4DC0-80CB-859C98E24906}</Project>
+      <Name>gostGUI.Runner</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+  <!-- R23：把中转进程复制到 UI 输出目录，发布形态保持“两个 exe + config.json”。
+       路径相对本工程解析，直接构建 gostGUI.csproj 时也不会依赖 $(SolutionDir)。 -->
+  <Target Name="CopyRunnerToOutput" AfterTargets="Build">
+    <ItemGroup>
+      <_RunnerExe Include="$(MSBuildProjectDirectory)\..\gostGUI.Runner\bin\$(Configuration)\gostGUI.Runner.exe" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_RunnerExe)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('@(_RunnerExe)')" />
+  </Target>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

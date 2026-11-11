@@ -2,27 +2,32 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-namespace gostGUI
+namespace gostGUI.Shared
 {
     /// <summary>
-    /// Manages a Windows Job Object to ensure that all child processes are terminated
-    /// when the main application exits, even if it crashes.
+    /// Job Object 包装：把子进程（树）放进同一个 Job，Job 句柄关闭时内核强制结束 Job 内的全部进程
+    /// （JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE），用于“工具崩溃也不留孤儿”的兜底清理。
+    /// UI 进程用它管理直连子进程，runner 进程用它管理自己拉起的子进程树；两个 exe 共用这一份实现。
     /// </summary>
     public class JobObjectManager : IDisposable
     {
+        /// <summary>同时保护句柄与释放标记：runner 的管道读线程可能并发调用 Terminate / Dispose。</summary>
+        private readonly object _gate = new object();
+
         private IntPtr _jobHandle;
-        private bool _disposed = false;
+        private bool _disposed;
 
         public JobObjectManager()
         {
-            // Create the job object.
+            // 创建匿名 Job；句柄一旦关闭，Job 内的进程全部被内核终止。
             _jobHandle = CreateJobObject(IntPtr.Zero, null);
             if (_jobHandle == IntPtr.Zero)
             {
-                throw new InvalidOperationException($"Failed to create a job object. Error: {Marshal.GetLastWin32Error()}");
+                throw new InvalidOperationException(
+                    "创建 Job Object 失败，Windows 错误码 " + Marshal.GetLastWin32Error());
             }
 
-            // Configure the job to kill all processes associated with it when the job handle is closed.
+            // 设置“Job 句柄关闭即杀死 Job 内全部进程”的兜底策略。
             var extendedInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
             {
                 BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
@@ -37,9 +42,14 @@ namespace gostGUI
             {
                 Marshal.StructureToPtr(extendedInfo, extendedInfoPtr, false);
 
-                if (!SetInformationJobObject(_jobHandle, JobObjectInfoType.ExtendedLimitInformation, extendedInfoPtr, (uint)length))
+                if (!SetInformationJobObject(_jobHandle, JobObjectInfoType.ExtendedLimitInformation,
+                        extendedInfoPtr, (uint)length))
                 {
-                    throw new InvalidOperationException($"Failed to set job object information. Error: {Marshal.GetLastWin32Error()}");
+                    int error = Marshal.GetLastWin32Error();
+                    CloseHandle(_jobHandle);
+                    _jobHandle = IntPtr.Zero;
+                    throw new InvalidOperationException(
+                        "设置 Job Object 信息失败，Windows 错误码 " + error);
                 }
             }
             finally
@@ -49,17 +59,58 @@ namespace gostGUI
         }
 
         /// <summary>
-        /// Assigns a process to the job object.
+        /// 把进程加入 Job。进程已退出/尚未启动或 Job 已释放时返回 false，绝不抛异常
+        /// （调用方通常在子进程刚启动后调用，失败只意味着兜底清理不可用，不应影响已经开始的转发）。
         /// </summary>
-        /// <param name="process">The process to add.</param>
-        /// <returns>True if the process was successfully added, otherwise false.</returns>
         public bool AddProcess(Process process)
         {
-            if (process == null || process.Handle == IntPtr.Zero)
+            if (process == null)
             {
                 return false;
             }
-            return AssignProcessToJobObject(_jobHandle, process.Handle);
+
+            lock (_gate)
+            {
+                if (_disposed || _jobHandle == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                IntPtr processHandle;
+                try
+                {
+                    processHandle = process.Handle;
+                }
+                catch (Exception)
+                {
+                    // 进程对象尚未启动或句柄已被释放：没有可加入的目标。
+                    return false;
+                }
+
+                if (processHandle == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                return AssignProcessToJobObject(_jobHandle, processHandle);
+            }
+        }
+
+        /// <summary>
+        /// 立即终止 Job 内的全部进程（退出码 1），但不关闭 Job 句柄；已释放或创建失败时返回 false。
+        /// runner 收到 stop 或发现 UI 管道消失时用它，比逐个子进程 Kill 更彻底。
+        /// </summary>
+        public bool Terminate()
+        {
+            lock (_gate)
+            {
+                if (_disposed || _jobHandle == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                return TerminateJobObject(_jobHandle, 1);
+            }
         }
 
         public void Dispose()
@@ -70,13 +121,19 @@ namespace gostGUI
 
         protected virtual void Dispose(bool disposing)
         {
-            if (!_disposed)
+            lock (_gate)
             {
+                if (_disposed)
+                {
+                    return;
+                }
+
                 if (_jobHandle != IntPtr.Zero)
                 {
                     CloseHandle(_jobHandle);
                     _jobHandle = IntPtr.Zero;
                 }
+
                 _disposed = true;
             }
         }
@@ -96,6 +153,9 @@ namespace gostGUI
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

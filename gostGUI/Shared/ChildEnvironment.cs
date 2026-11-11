@@ -8,7 +8,8 @@ namespace gostGUI.Shared
     /// <summary>
     /// 把环境变量覆盖应用到子进程启动信息：正常的 psi.EnvironmentVariables 路径、net48 大小写重名父环境的
     /// 一次性规范化与临时环境兜底、以及 Windows 环境块的 32767 上限守卫。
-    /// UI 进程与 runner 进程共用这一份实现；不引用 WinForms / 文件 IO，绝不把异常抛给调用方。
+    /// UI 进程与 runner 进程共用这一份实现；不引用 WinForms / 文件 IO。环境应用部分只回中文 error / 日志，
+    /// 绝不抛异常；但 <see cref="ApplyAndStart"/> 会原样抛回 start 回调（子进程启动）的异常，供调用方识别 Win32 错误码。
     /// 需要真正启动子进程的调用方必须使用 <see cref="ApplyAndStart"/>：Process.Start 会从活环境捕获子进程环境块
     /// （即使没有任何覆盖项），这次捕获必须与别的调用的临时覆盖窗口同处一把锁内。
     /// 传入的 psi 必须是新建且尚未访问过 EnvironmentVariables 的实例；若调用前已访问且首次访问失败，

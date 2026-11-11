@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Text;
+using System.Threading;
 using gostGUI.Shared;
 
 namespace gostGUI
@@ -10,10 +12,22 @@ namespace gostGUI
     /// <summary>
     /// 同权限直连启动的进程管理器：由 LaunchPipeline 装配启动参数，应用工作目录与环境变量覆盖，
     /// 把 stdout / stderr / 系统消息分别上报，并用 Job Object 在工具退出或崩溃时清理子进程树。
+    /// <para>
+    /// 调试开关 GOSTGUI_FORCE_RUNNER=1 时全部改走中转进程（RunnerSession），事件与状态语义保持一致；
+    /// 默认路径不变，仍然在 UI 进程内直接启动子进程。
+    /// </para>
     /// </summary>
     public class ProcessManager : IDisposable
     {
+        /// <summary>与 gostGUI.exe 放在同一目录的中转进程文件名。</summary>
+        private const string RunnerFileName = "gostGUI.Runner.exe";
+
+        /// <summary>停止中转会话的上限：超时后 RunnerSession 会杀掉 runner，由其 Job 带走子进程树。</summary>
+        private static readonly TimeSpan RunnerStopTimeout = TimeSpan.FromSeconds(8);
+
         private readonly Dictionary<ConfigItem, Process> _processes = new Dictionary<ConfigItem, Process>();
+        private readonly Dictionary<ConfigItem, RunnerSession> _sessions =
+            new Dictionary<ConfigItem, RunnerSession>();
         private readonly object _lock = new object();
         private readonly JobObjectManager _jobManager;
 
@@ -43,6 +57,12 @@ namespace gostGUI
             if (item == null) return false;
             lock (_lock)
             {
+                // 中转会话在 Exited 回调里从字典移除，登记期间就代表“运行中”。
+                if (_sessions.ContainsKey(item))
+                {
+                    return true;
+                }
+
                 if (_processes.TryGetValue(item, out Process p) && p != null)
                 {
                     try
@@ -64,6 +84,12 @@ namespace gostGUI
             if (item == null) return 0;
             lock (_lock)
             {
+                if (_sessions.TryGetValue(item, out RunnerSession session) && session != null)
+                {
+                    // started 握手已经保证 ChildPid > 0；这里仍按“拿不到就返回 0”的既有契约收口。
+                    return session.ChildPid > 0 ? session.ChildPid : 0;
+                }
+
                 if (!_processes.TryGetValue(item, out Process p) || p == null)
                 {
                     return 0;
@@ -107,6 +133,7 @@ namespace gostGUI
             }
 
             Process p = null;
+            RunnerSession session = null;
             StartSequence sequence = null;
             string startupError = null;
             bool elevationRequired = false;
@@ -123,6 +150,32 @@ namespace gostGUI
             if (!string.IsNullOrEmpty(request.Error))
             {
                 startupError = "启动失败：" + request.Error;
+            }
+            else if (IsForceRunnerEnabled())
+            {
+                // 调试开关：同权限直起中转进程，用于在没有 UAC 的情况下验证管道与 runner 全链路。
+                // sequence 在这里创建，runner 的 Exited 回调与直连路径共用同一套 started/exit 时序闩。
+                try
+                {
+                    sequence = new StartSequence();
+                    string runnerPath = Path.Combine(Common.GetApplicationPath(), RunnerFileName);
+                    session = RunnerSession.StartAsync(request, RunnerLaunchMode.SameIntegrity,
+                            runnerPath, Common.GetApplicationPath(), CancellationToken.None)
+                        .GetAwaiter().GetResult();
+                    if (session == null)
+                    {
+                        startupError = "启动失败：中转进程没有返回有效会话。";
+                    }
+                }
+                catch (Win32Exception ex)
+                {
+                    elevationRequired = ex.NativeErrorCode == 740;
+                    startupError = $"启动失败：{DescribeWin32ErrorLocal(ex.NativeErrorCode)}（Windows 错误码 {ex.NativeErrorCode}）";
+                }
+                catch (Exception ex)
+                {
+                    startupError = "启动失败：" + ex.Message;
+                }
             }
             else
             {
@@ -181,6 +234,18 @@ namespace gostGUI
                     SafeDispose(p);
                 }
 
+                if (session != null)
+                {
+                    try
+                    {
+                        session.Dispose();
+                    }
+                    catch
+                    {
+                        // 启动失败路径上的清理尽力而为。
+                    }
+                }
+
                 try
                 {
                     LogSystem(configItem, startupError);
@@ -195,49 +260,67 @@ namespace gostGUI
 
             // 启动成功后，登记 / 异步读 / 事件阶段的异常都只能记日志：
             // 子进程确实已经在跑，不能再把 StartProcess 变成抛异常或返回失败。
-            try
+            if (session != null)
             {
-                _jobManager.AddProcess(p);
-            }
-            catch (Exception)
-            {
-                // 子进程可能已退出（句柄失效）或已在别的 Job 里；加入 Job 失败不影响本次启动结论。
-            }
-
-            try
-            {
-                // 在锁内完成“检查未退出 + 登记”，与 Exited 回调里的“锁内移除”互斥：
-                // 快速退出的子进程不会在字典里留下“已退出但仍登记为运行中”的记录。
-                lock (_lock)
+                try
                 {
-                    if (!HasExitedSafe(p))
+                    RegisterRunnerSession(configItem, session, sequence);
+                }
+                catch (Exception ex)
+                {
+                    try
                     {
-                        _processes[configItem] = p;
+                        LogSystem(configItem, "登记中转会话失败：" + ex.Message);
+                    }
+                    catch { }
+                }
+            }
+            else
+            {
+                try
+                {
+                    _jobManager.AddProcess(p);
+                }
+                catch (Exception)
+                {
+                    // 子进程可能已退出（句柄失效）或已在别的 Job 里；加入 Job 失败不影响本次启动结论。
+                }
+
+                try
+                {
+                    // 在锁内完成“检查未退出 + 登记”，与 Exited 回调里的“锁内移除”互斥：
+                    // 快速退出的子进程不会在字典里留下“已退出但仍登记为运行中”的记录。
+                    lock (_lock)
+                    {
+                        if (!HasExitedSafe(p))
+                        {
+                            _processes[configItem] = p;
+                        }
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                try
+                catch (Exception ex)
                 {
-                    LogSystem(configItem, "登记子进程失败：" + ex.Message);
+                    try
+                    {
+                        LogSystem(configItem, "登记子进程失败：" + ex.Message);
+                    }
+                    catch { }
                 }
-                catch { }
-            }
 
-            // 先启动异步读，再触发 started；子进程已退出时读线程可能起不来，退出事件仍会照常上报。
-            try
-            {
-                p.BeginOutputReadLine();
-                p.BeginErrorReadLine();
-            }
-            catch (Exception ex)
-            {
+                // 先启动异步读，再触发 started；子进程已退出时读线程可能起不来，退出事件仍会照常上报。
                 try
                 {
-                    LogSystem(configItem, "无法读取子进程输出：" + ex.Message);
+                    p.BeginOutputReadLine();
+                    p.BeginErrorReadLine();
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        LogSystem(configItem, "无法读取子进程输出：" + ex.Message);
+                    }
+                    catch { }
+                }
             }
 
             // 无论登记/读线程是否出过问题，started 事件都必须尝试发出，否则退出事件会永远滞留在记账状态。
@@ -266,12 +349,42 @@ namespace gostGUI
         {
             if (configItem == null) return;
             Process p = null;
+            RunnerSession session = null;
             lock (_lock)
             {
                 if (_processes.TryGetValue(configItem, out p))
                 {
                     _processes.Remove(configItem);
                 }
+
+                if (_sessions.TryGetValue(configItem, out session))
+                {
+                    _sessions.Remove(configItem);
+                }
+            }
+
+            if (session != null)
+            {
+                // R27：先礼后兵——发 stop 等 exit，超时后 RunnerSession 会杀 runner，由 runner 的 Job 带走子进程树。
+                try
+                {
+                    session.StopAsync(RunnerStopTimeout).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    LogSystem(configItem, "停止中转进程失败：" + ex.Message);
+                }
+                finally
+                {
+                    try
+                    {
+                        session.Dispose();
+                    }
+                    catch { }
+                    ProcessStopped?.Invoke(configItem);
+                }
+
+                return;
             }
 
             if (p != null)
@@ -305,7 +418,9 @@ namespace gostGUI
             lock (_lock)
             {
                 // Create a copy of keys to avoid modification during iteration
-                runningItems = new List<ConfigItem>(_processes.Keys);
+                var running = new HashSet<ConfigItem>(_processes.Keys);
+                running.UnionWith(_sessions.Keys);
+                runningItems = new List<ConfigItem>(running);
             }
 
             foreach (ConfigItem item in runningItems)
@@ -318,6 +433,46 @@ namespace gostGUI
         {
             StopAllProcesses();
             _jobManager?.Dispose();
+        }
+
+        /// <summary>调试开关：只有精确等于 "1" 才强制走 runner；未设置或其它值保持直连行为。</summary>
+        private static bool IsForceRunnerEnabled()
+        {
+            return string.Equals(Environment.GetEnvironmentVariable("GOSTGUI_FORCE_RUNNER"), "1",
+                StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// 登记中转会话：会话先行登记再挂事件，Exited 回调按“只移除自己这一条”的规则清理字典；
+        /// 会话在挂事件前就退出时，RunnerSession 会补发缓冲的退出事件，sequence 负责 started 先于 exit 的时序。
+        /// </summary>
+        private void RegisterRunnerSession(ConfigItem configItem, RunnerSession session, StartSequence sequence)
+        {
+            lock (_lock)
+            {
+                _sessions[configItem] = session;
+            }
+
+            session.Output += (kind, text) =>
+            {
+                OutputReceived?.Invoke(configItem, kind, text + Environment.NewLine);
+            };
+
+            session.Exited += code =>
+            {
+                lock (_lock)
+                {
+                    // 只移除自己这一条：停止后立刻重启同一个配置项时，旧会话的退出回调
+                    // 不能把刚登记的新会话从字典里删掉。
+                    if (_sessions.TryGetValue(configItem, out RunnerSession current) &&
+                        ReferenceEquals(current, session))
+                    {
+                        _sessions.Remove(configItem);
+                    }
+                }
+
+                sequence.NotifyExit(code, c => ProcessExited?.Invoke(configItem, c));
+            };
         }
 
         /// <summary>管理器自身产生的消息（启动/停止/错误）一律走 System 类别。</summary>

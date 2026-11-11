@@ -2,8 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using gostGUI.Shared;
 using Microsoft.Win32.SafeHandles;
 
@@ -100,6 +103,17 @@ namespace gostGUI
             // 边界用例放在 Direct 之后：accept 分支会触发一次性的父环境规范化，
             // 不能抢在 Direct_AppliesEnvOverrides 之前消耗掉它要断言的“已自动规范化”日志。
             Check("ChildEnv_BlockSizeBoundary_32767Accepted_32768Rejected", ChildEnvBlockSizeBoundary);
+
+            // 中转进程：真实拉起与 UI 同目录的 gostGUI.Runner.exe 走 --spec，
+            // 验证 ready → started → out → exit 的顺序、流别与退出清理。
+            Check("Runner_RelaysStdoutStderrAndExitCode", RunnerRelaysStdoutStderrAndExitCode);
+
+            // UI 侧 RunnerSession：真实走命名管道握手、事件转发与停止。runner exe 缺失时按失败处理（不 SKIP）：
+            // 这些用例只在构建输出目录里运行，缺 exe 意味着打包/构建坏了，必须让套件失败。
+            Check("Runner_Smoke_RelaysOutputAndCleansUp", RunnerSmokeRelaysOutputAndCleansUp);
+            Check("Runner_Smoke_StopKillsChildTree", RunnerSmokeStopKillsChildTree);
+            Check("Runner_SpecFileFallback_RelaysOutput", RunnerSpecFileFallbackRelaysOutput);
+            Check("Runner_ForceRunnerRouting_RelaysAndStops", RunnerForceRunnerRoutingRelaysAndStops);
         }
 
         // 配置模型用例全部使用绝对临时路径：--selftest 不改变当前目录。
@@ -2228,6 +2242,601 @@ namespace gostGUI
             AssertEqual("", error);
         }
 
+        // 中转进程用例夹具：runner 由 post-build 复制到 UI 输出目录，路径与 gostGUI.exe 同目录。
+
+        private const int RunnerWaitTimeoutMs = 15000;
+
+        /// <summary>
+        /// 真实拉起 gostGUI.Runner.exe：它应按 --spec 连上命名管道，转发 cmd 的 stdout/stderr，
+        /// 发 exit(0) 后自行退出，并让子进程随之消失。每一步等待都有 15s 上限，失败时释放全部句柄。
+        /// </summary>
+        private static void RunnerRelaysStdoutStderrAndExitCode()
+        {
+            string runnerPath = Path.Combine(Common.GetApplicationPath(), "gostGUI.Runner.exe");
+            if (!File.Exists(runnerPath))
+            {
+                Notice("SKIP Runner_RelaysStdoutStderrAndExitCode：找不到 " + runnerPath);
+                return;
+            }
+
+            string pipeName = "gostgui." + Guid.NewGuid().ToString("N");
+            string nonce = Guid.NewGuid().ToString("N");
+            var spec = new LaunchSpec
+            {
+                Nonce = nonce,
+                Pipe = pipeName,
+                Program = CmdPath(),
+                Arguments = "/d /s /c \"echo hello & echo bye 1>&2\"",
+                WorkingDirectory = Path.GetTempPath(),
+                Kind = ChildKind.Executable
+            };
+
+            var frames = new List<IpcMessage>();
+            var frameGate = new object();
+            var exitReceived = new ManualResetEventSlim(false);
+            NamedPipeServerStream server = null;
+            Process runner = null;
+            Task connectionTask = null;
+            Task readerTask = null;
+            StreamReader reader = null;
+            try
+            {
+                server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                connectionTask = server.WaitForConnectionAsync();
+
+                runner = Process.Start(new ProcessStartInfo
+                {
+                    FileName = runnerPath,
+                    Arguments = "--spec " + LaunchSpecCodec.ToBase64(spec),
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+                Assert(runner != null, "中转进程应成功启动");
+
+                // 轮询而不是死等连接：runner 提前退出（参数/协议坏了）时立刻失败，不白等满 15s。
+                Assert(WaitUntil(() => connectionTask.IsCompleted || runner.HasExited, RunnerWaitTimeoutMs),
+                    "中转进程应在限定时间内连上命名管道");
+                string runnerExitHint = runner.HasExited
+                    ? "，runner 已退出，退出码 " + runner.ExitCode
+                    : "，runner 仍在运行";
+                Assert(connectionTask.IsCompleted,
+                    "中转进程在连上命名管道前就退出了" + runnerExitHint);
+                try
+                {
+                    connectionTask.Wait();
+                }
+                catch (Exception ex)
+                {
+                    throw new SelfTestFailureException("等待命名管道连接失败：" + ex.Message);
+                }
+
+                reader = new StreamReader(server, new UTF8Encoding(false), false, 4096, true);
+
+                // 读帧放到后台：主线程只按 exitReceived 做有上限的等待，收尾时关管道即可解除阻塞。
+                StreamReader frameReader = reader;
+                readerTask = Task.Run(() =>
+                {
+                    while (true)
+                    {
+                        IpcMessage message;
+                        try
+                        {
+                            message = IpcFraming.Read(frameReader);
+                        }
+                        catch (Exception)
+                        {
+                            // 收尾阶段关闭管道会让阻塞中的 ReadLine 抛异常，这不是用例结论。
+                            return;
+                        }
+
+                        if (message == null)
+                        {
+                            return;
+                        }
+
+                        lock (frameGate)
+                        {
+                            frames.Add(message);
+                        }
+
+                        if (message.Type == "exit")
+                        {
+                            exitReceived.Set();
+                            return;
+                        }
+                    }
+                });
+
+                Assert(exitReceived.Wait(RunnerWaitTimeoutMs),
+                    "应在限定时间内收到 exit 帧：" + DescribeFrames(frames, frameGate));
+
+                List<IpcMessage> received;
+                lock (frameGate)
+                {
+                    received = new List<IpcMessage>(frames);
+                }
+
+                Assert(received.Count >= 4, "应至少收到 ready/started/out/exit 四类帧：" + DescribeFrames(received));
+                AssertEqual("ready", received[0].Type);
+                AssertEqual(nonce, received[0].Nonce);
+
+                int startedIndex = received.FindIndex(m => m.Type == "started");
+                Assert(startedIndex > 0, "应收到带子进程 PID 的 started 帧：" + DescribeFrames(received));
+                int childPid = received[startedIndex].Pid;
+                Assert(childPid > 0, "started 帧应带正数子进程 PID：" + DescribeFrames(received));
+
+                int firstOutIndex = received.FindIndex(m => m.Type == "out");
+                Assert(firstOutIndex > startedIndex, "started 必须先于任何 out 帧：" + DescribeFrames(received));
+
+                Assert(received.Exists(m => m.Type == "out" && m.Stream == "o" && ContainsFrameData(m, "hello")),
+                    "应收到包含 hello 的 stdout 帧：" + DescribeFrames(received));
+                Assert(received.Exists(m => m.Type == "out" && m.Stream == "e" && ContainsFrameData(m, "bye")),
+                    "应收到包含 bye 的 stderr 帧：" + DescribeFrames(received));
+
+                // 两条流不能串台。
+                Assert(!received.Exists(m => m.Type == "out" && m.Stream == "e" && ContainsFrameData(m, "hello")),
+                    "stdout 内容不应从 stderr 通道送达：" + DescribeFrames(received));
+                Assert(!received.Exists(m => m.Type == "out" && m.Stream == "o" && ContainsFrameData(m, "bye")),
+                    "stderr 内容不应从 stdout 通道送达：" + DescribeFrames(received));
+
+                IpcMessage last = received[received.Count - 1];
+                AssertEqual("exit", last.Type);
+                AssertEqual(0, last.ExitCode);
+
+                Assert(runner.WaitForExit(RunnerWaitTimeoutMs), "中转进程应在发完 exit 帧后退出");
+                Assert(WaitUntil(() => IsProcessGone(childPid), RunnerWaitTimeoutMs),
+                    "子进程应随中转进程消失（PID " + childPid + "）");
+            }
+            finally
+            {
+                // 顺序：先关管道解除读线程阻塞，再收线程，最后兜底杀 runner（超时时不留孤儿）。
+                try
+                {
+                    server?.Dispose();
+                }
+                catch (Exception)
+                {
+                }
+
+                if (readerTask != null)
+                {
+                    try
+                    {
+                        readerTask.Wait(5000);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+
+                try
+                {
+                    reader?.Dispose();
+                }
+                catch (Exception)
+                {
+                }
+
+                if (runner != null)
+                {
+                    try
+                    {
+                        if (!runner.HasExited)
+                        {
+                            runner.Kill();
+                        }
+
+                        runner.WaitForExit(5000);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                    finally
+                    {
+                        runner.Dispose();
+                    }
+                }
+
+                exitReceived.Dispose();
+            }
+        }
+
+        // UI 侧 RunnerSession 用例：真实建管道、拉起 runner、转发输出并在停止后清理子进程树。
+
+        /// <summary>
+        /// R29 的端到端 smoke：经 RunnerSession 跑 cmd 的 hello/bye，断言流别、退出码与子进程清理。
+        /// runner exe 缺失按失败处理（R26：构建输出目录里缺 runner 是打包回归，不能 SKIP）。
+        /// </summary>
+        private static void RunnerSmokeRelaysOutputAndCleansUp()
+        {
+            string runnerPath = Path.Combine(Common.GetApplicationPath(), "gostGUI.Runner.exe");
+            Assert(File.Exists(runnerPath), "找不到中转进程：" + runnerPath + "（请先构建解决方案）");
+
+            var request = new LaunchRequest
+            {
+                FileName = CmdPath(),
+                Arguments = "/d /s /c \"echo hello & echo bye 1>&2\"",
+                WorkingDirectory = Path.GetTempPath(),
+                Kind = ChildKind.Executable,
+                EnvOverrides = EmptyEnv()
+            };
+
+            var output = new RunnerOutputCollector();
+            var exitReceived = new ManualResetEventSlim(false);
+            int exitCode = int.MinValue;
+            RunnerSession session = null;
+            try
+            {
+                session = RunnerSession.StartAsync(request, RunnerLaunchMode.SameIntegrity, runnerPath,
+                    Common.GetApplicationPath(), CancellationToken.None).GetAwaiter().GetResult();
+                session.Output += output.Add;
+                session.Exited += code =>
+                {
+                    exitCode = code;
+                    exitReceived.Set();
+                };
+
+                Assert(session.ChildPid != 0, "started 帧应给出正数子进程 PID");
+                Assert(exitReceived.Wait(RunnerWaitTimeoutMs),
+                    "应在 15 秒内收到 Exited：" + output.Describe());
+                AssertEqual(0, exitCode);
+                Assert(output.Has(LogKind.Stdout, "hello"), "stdout 应包含 hello：" + output.Describe());
+                Assert(output.Has(LogKind.Stderr, "bye"), "stderr 应包含 bye：" + output.Describe());
+                Assert(!output.Has(LogKind.Stdout, "bye"), "stderr 内容不应从 stdout 通道送达：" + output.Describe());
+                Assert(!output.Has(LogKind.Stderr, "hello"), "stdout 内容不应从 stderr 通道送达：" + output.Describe());
+                Assert(WaitUntil(() => IsProcessGone(session.ChildPid), RunnerWaitTimeoutMs),
+                    "子进程应随会话结束消失（PID " + session.ChildPid + "）");
+            }
+            finally
+            {
+                if (session != null)
+                {
+                    session.Dispose();
+                }
+
+                exitReceived.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// R27 的真实 job-kill 用例：启动 ping 常驻子进程，StopAsync 超时前必须靠 stop 帧结束整棵树。
+        /// 断言 Exited 已触发、子进程 PID 在限定时间内消失，并记录 StopAsync 用时。
+        /// </summary>
+        private static void RunnerSmokeStopKillsChildTree()
+        {
+            string runnerPath = Path.Combine(Common.GetApplicationPath(), "gostGUI.Runner.exe");
+            Assert(File.Exists(runnerPath), "找不到中转进程：" + runnerPath + "（请先构建解决方案）");
+
+            var request = new LaunchRequest
+            {
+                FileName = CmdPath(),
+                Arguments = "/d /s /c \"ping -n 60 127.0.0.1\"",
+                WorkingDirectory = Path.GetTempPath(),
+                Kind = ChildKind.Executable,
+                EnvOverrides = EmptyEnv()
+            };
+
+            var exitReceived = new ManualResetEventSlim(false);
+            RunnerSession session = null;
+            try
+            {
+                session = RunnerSession.StartAsync(request, RunnerLaunchMode.SameIntegrity, runnerPath,
+                    Common.GetApplicationPath(), CancellationToken.None).GetAwaiter().GetResult();
+                int childPid = session.ChildPid;
+                Assert(childPid != 0, "started 帧应给出正数子进程 PID");
+                session.Exited += code => exitReceived.Set();
+
+                var stopwatch = Stopwatch.StartNew();
+                session.StopAsync(TimeSpan.FromSeconds(8)).GetAwaiter().GetResult();
+                stopwatch.Stop();
+
+                Assert(exitReceived.Wait(RunnerWaitTimeoutMs), "StopAsync 返回后应已触发 Exited");
+                Assert(WaitUntil(() => IsProcessGone(childPid), RunnerWaitTimeoutMs),
+                    "停止后子进程应从系统消失（PID " + childPid + "）");
+                Notice("Runner_Smoke_StopKillsChildTree：StopAsync 用时 " + stopwatch.ElapsedMilliseconds + " ms");
+            }
+            finally
+            {
+                if (session != null)
+                {
+                    session.Dispose();
+                }
+
+                exitReceived.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Ruling 3 的 --spec-file 兜底：把 spec 撑到 Base64 超过 Windows 命令行上限（32767 字符），
+        /// 只有临时文件路径能启动成功；同时验证大环境覆盖仍然生效、临时文件不残留。
+        /// </summary>
+        private static void RunnerSpecFileFallbackRelaysOutput()
+        {
+            string runnerPath = Path.Combine(Common.GetApplicationPath(), "gostGUI.Runner.exe");
+            Assert(File.Exists(runnerPath), "找不到中转进程：" + runnerPath + "（请先构建解决方案）");
+
+            // 按本机父环境块大小反推一个“环境块不超限、但 JSON 的 Base64 超过命令行上限”的值长度。
+            const string bigKey = "GOSTGUI_SMOKE_BIG";
+            long parentSize = ParentEnvironmentBlockSize();
+            int valueLength = (int)(32767 - parentSize - (bigKey.Length + 2) - 512);
+            Assert(valueLength > 0, "父环境过大，构造不出 --spec-file 夹具（父环境块 " + parentSize + " 字节）");
+
+            var overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { bigKey, new string('x', valueLength) }
+            };
+
+            var request = new LaunchRequest
+            {
+                FileName = CmdPath(),
+                Arguments = "/d /s /c \"echo specfile\"",
+                WorkingDirectory = Path.GetTempPath(),
+                Kind = ChildKind.Executable,
+                EnvOverrides = overrides
+            };
+
+            // 探针 spec 与 StartAsync 内部构造的 spec 字段长度一致（nonce/pipe 都是 32 字符 GUID），
+            // 用它证明这个夹具确实只能走 --spec-file，而不是一条假的普通 smoke。
+            var probe = new LaunchSpec
+            {
+                Nonce = new string('n', 32),
+                Pipe = "gostgui." + new string('p', 32),
+                Program = request.FileName,
+                Arguments = request.Arguments,
+                WorkingDirectory = request.WorkingDirectory,
+                Kind = request.Kind,
+                EnvOverrides = overrides
+            };
+            Assert(LaunchSpecCodec.NeedsTempFile(probe), "夹具的 spec 必须超过 8000 字符");
+            int base64Length = LaunchSpecCodec.ToBase64(probe).Length;
+            Assert(base64Length > 32767,
+                "夹具的 spec Base64 长度 " + base64Length + " 未超过 Windows 命令行上限 32767，无法证明走了 --spec-file");
+
+            var output = new RunnerOutputCollector();
+            var exitReceived = new ManualResetEventSlim(false);
+            int exitCode = int.MinValue;
+            RunnerSession session = null;
+            try
+            {
+                session = RunnerSession.StartAsync(request, RunnerLaunchMode.SameIntegrity, runnerPath,
+                    Common.GetApplicationPath(), CancellationToken.None).GetAwaiter().GetResult();
+                session.Output += output.Add;
+                session.Exited += code =>
+                {
+                    exitCode = code;
+                    exitReceived.Set();
+                };
+
+                Assert(session.ChildPid != 0, "started 帧应给出正数子进程 PID");
+                Assert(exitReceived.Wait(RunnerWaitTimeoutMs),
+                    "应在 15 秒内收到 Exited：" + output.Describe());
+                AssertEqual(0, exitCode);
+                Assert(output.Has(LogKind.Stdout, "specfile"),
+                    "大 spec 经 --spec-file 转发的 stdout 应包含 specfile：" + output.Describe());
+                Assert(WaitUntil(() => IsProcessGone(session.ChildPid), RunnerWaitTimeoutMs),
+                    "子进程应随会话结束消失（PID " + session.ChildPid + "）");
+            }
+            finally
+            {
+                if (session != null)
+                {
+                    session.Dispose();
+                }
+
+                exitReceived.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// R29 的强制中转选路：GOSTGUI_FORCE_RUNNER=1 时 ProcessManager 必须走 RunnerSession，
+        /// 输出/退出事件照旧送达，StopProcess 结束后子进程与 runner 都不得残留。
+        /// </summary>
+        private static void RunnerForceRunnerRoutingRelaysAndStops()
+        {
+            string runnerPath = Path.Combine(Common.GetApplicationPath(), "gostGUI.Runner.exe");
+            Assert(File.Exists(runnerPath), "找不到中转进程：" + runnerPath + "（请先构建解决方案）");
+
+            string previous = Environment.GetEnvironmentVariable("GOSTGUI_FORCE_RUNNER");
+            ProcessManager manager = null;
+            var output = new RunnerOutputCollector();
+            var exitReceived = new ManualResetEventSlim(false);
+            int exitCode = int.MinValue;
+            try
+            {
+                Assert(WaitUntil(() => CountRunnerProcesses() == 0, RunnerWaitTimeoutMs),
+                    "强制 runner 用例开始前不应有残留的中转进程");
+
+                Environment.SetEnvironmentVariable("GOSTGUI_FORCE_RUNNER", "1");
+                manager = new ProcessManager();
+                manager.OutputReceived += (item, kind, text) => output.Add(kind, text);
+                manager.ProcessExited += (item, code) =>
+                {
+                    exitCode = code;
+                    exitReceived.Set();
+                };
+
+                var configItem = new ConfigItem
+                {
+                    Name = "强制中转",
+                    Enable = true,
+                    Program = CmdPath(),
+                    Args = "/d /s /c \"echo forced & echo routed 1>&2 & ping -n 60 127.0.0.1 >nul\"",
+                    WorkDir = Path.GetTempPath()
+                };
+
+                Assert(manager.StartProcess(configItem), "GOSTGUI_FORCE_RUNNER=1 时应通过中转进程启动");
+                int childPid = manager.GetChildPid(configItem);
+                Assert(childPid != 0, "强制 runner 路径的 GetChildPid 应返回子进程 PID");
+                Assert(manager.IsProcessRunning(configItem), "启动后应报告运行中");
+                Assert(WaitUntil(() => CountRunnerProcesses() > 0, RunnerWaitTimeoutMs),
+                    "应观察到中转进程在运行");
+                Assert(WaitUntil(() => output.Has(LogKind.Stdout, "forced"), RunnerWaitTimeoutMs),
+                    "强制 runner 路径应转发 stdout：" + output.Describe());
+                Assert(WaitUntil(() => output.Has(LogKind.Stderr, "routed"), RunnerWaitTimeoutMs),
+                    "强制 runner 路径应转发 stderr：" + output.Describe());
+
+                manager.StopProcess(configItem);
+                Assert(exitReceived.Wait(RunnerWaitTimeoutMs), "StopProcess 后应收到 ProcessExited");
+                Assert(exitCode != int.MinValue, "ProcessExited 应带退出码");
+                Assert(!manager.IsProcessRunning(configItem), "停止后不应报告运行中");
+                Assert(WaitUntil(() => IsProcessGone(childPid), RunnerWaitTimeoutMs),
+                    "停止后子进程应消失（PID " + childPid + "）");
+                Assert(WaitUntil(() => CountRunnerProcesses() == 0, RunnerWaitTimeoutMs),
+                    "停止后中转进程应退出");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("GOSTGUI_FORCE_RUNNER", previous);
+                exitReceived.Dispose();
+                if (manager != null)
+                {
+                    manager.Dispose();
+                }
+            }
+        }
+
+        /// <summary>当前机器上名为 gostGUI.Runner 的进程数；用完立即释放 Process 句柄。</summary>
+        private static int CountRunnerProcesses()
+        {
+            Process[] processes = Process.GetProcessesByName("gostGUI.Runner");
+            try
+            {
+                return processes.Length;
+            }
+            finally
+            {
+                foreach (Process process in processes)
+                {
+                    process.Dispose();
+                }
+            }
+        }
+
+        /// <summary>收集中转会话的输出行；事件来自读帧线程，必须加锁。</summary>
+        private sealed class RunnerOutputCollector
+        {
+            private readonly object _gate = new object();
+            private readonly List<KeyValuePair<LogKind, string>> _lines =
+                new List<KeyValuePair<LogKind, string>>();
+
+            public void Add(LogKind kind, string text)
+            {
+                lock (_gate)
+                {
+                    _lines.Add(new KeyValuePair<LogKind, string>(kind, text ?? ""));
+                }
+            }
+
+            public bool Has(LogKind kind, string fragment)
+            {
+                lock (_gate)
+                {
+                    foreach (KeyValuePair<LogKind, string> line in _lines)
+                    {
+                        if (line.Key == kind && line.Value.Contains(fragment))
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                }
+            }
+
+            public string Describe()
+            {
+                lock (_gate)
+                {
+                    if (_lines.Count == 0)
+                    {
+                        return "（没有收到任何输出）";
+                    }
+
+                    var builder = new StringBuilder();
+                    foreach (KeyValuePair<LogKind, string> line in _lines)
+                    {
+                        builder.Append('[').Append(line.Key).Append("] ")
+                            .Append(line.Value.Trim()).Append("；");
+                    }
+
+                    return builder.ToString();
+                }
+            }
+        }
+
+        /// <summary>失败诊断：把已收到的帧按类型/流别/负载拼成一行。</summary>
+        private static string DescribeFrames(List<IpcMessage> frames, object gate)
+        {
+            lock (gate)
+            {
+                return DescribeFrames(new List<IpcMessage>(frames));
+            }
+        }
+
+        private static string DescribeFrames(List<IpcMessage> frames)
+        {
+            if (frames == null || frames.Count == 0)
+            {
+                return "（没有收到任何帧）";
+            }
+
+            var builder = new StringBuilder();
+            foreach (IpcMessage frame in frames)
+            {
+                builder.Append('[').Append(frame.Type);
+                if (!string.IsNullOrEmpty(frame.Stream))
+                {
+                    builder.Append('/').Append(frame.Stream);
+                }
+
+                if (!string.IsNullOrEmpty(frame.Data))
+                {
+                    builder.Append(' ').Append(frame.Data.Trim());
+                }
+
+                if (frame.Pid != 0)
+                {
+                    builder.Append(" pid=").Append(frame.Pid);
+                }
+
+                if (frame.Type == "exit")
+                {
+                    builder.Append(" code=").Append(frame.ExitCode);
+                }
+
+                builder.Append("] ");
+            }
+
+            return builder.ToString();
+        }
+
+        private static bool ContainsFrameData(IpcMessage message, string fragment)
+        {
+            return message != null && message.Data != null &&
+                   message.Data.IndexOf(fragment, StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>PID 是否已从系统消失；进程存在但已退出也算消失。</summary>
+        private static bool IsProcessGone(int pid)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById(pid))
+                {
+                    return process.HasExited;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         /// <summary>夹具缺失/环境不满足时跳过用例，并把跳过原因写进 selftest 结果与控制台。</summary>
         private static void Notice(string message)
         {
@@ -2308,6 +2917,39 @@ namespace gostGUI
             if (!TryWriteLog(log.ToString()))
             {
                 // 日志是权威输出之一，写不出来就按失败处理。
+                WriteLine(console, "FAIL 无法写入日志文件: " + LogPath);
+                failed++;
+            }
+
+            FlushQuietly(console);
+            return failed == 0 ? 0 : 1;
+        }
+
+        /// <summary>
+        /// 隐藏的 --runner-smoke：只跑端到端中转用例（与 Runner_Smoke_RelaysOutputAndCleansUp 同一段代码），
+        /// 退出码 0/1 与套件约定一致，并把同样的 PASS/FAIL 文本写进 selftest.log。
+        /// </summary>
+        public static int RunRunnerSmoke()
+        {
+            var log = new StringBuilder();
+            TextWriter console = ConsoleOutput.Open();
+            int failed = 0;
+
+            try
+            {
+                RunnerSmokeRelaysOutputAndCleansUp();
+                WriteLine(log, console, "PASS Runner_Smoke_RelaysOutputAndCleansUp");
+            }
+            catch (Exception ex)
+            {
+                failed++;
+                WriteLine(log, console, "FAIL Runner_Smoke_RelaysOutputAndCleansUp: " + DescribeFailure(ex));
+            }
+
+            WriteLine(log, console, failed == 0 ? "runner-smoke 通过" : "runner-smoke 失败");
+
+            if (!TryWriteLog(log.ToString()))
+            {
                 WriteLine(console, "FAIL 无法写入日志文件: " + LogPath);
                 failed++;
             }

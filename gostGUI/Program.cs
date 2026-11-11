@@ -29,6 +29,13 @@ namespace gostGUI
                 return SelfTest.RunAll();
             }
 
+            // 隐藏的中转进程端到端探针：只跑 relay smoke，退出码沿用 0/1 约定。
+            if (args.Any(a => a == "--runner-smoke"))
+            {
+                AttachConsole(AttachParentProcess);
+                return SelfTest.RunRunnerSmoke();
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
