@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
@@ -10,6 +11,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 using gostGUI.Shared;
 using Microsoft.Win32.SafeHandles;
 
@@ -136,6 +138,29 @@ namespace gostGUI
             Check("Elev_StandardUserLaunch_DoesNotLeavePrivilegesEnabled",
                 ElevStandardUserLaunchDoesNotLeavePrivilegesEnabled);
             Check("Elev_DirectItems_ChooseDirectAtBothIntegrities", ElevDirectItemsChooseDirectAtBothIntegrities);
+
+            // 主题（Task 11）：调色板、模式解析、跟随系统、递归应用与 IThemed 契约。
+            // 控件只在 STA 线程上创建，不跑消息循环、不显示窗口。
+            Check("Theme_PalettesDiffer", ThemePalettesDiffer);
+            Check("Theme_ModeParsing_RoundTrips", ThemeModeParsingRoundTrips);
+            Check("Theme_SystemPrefersDark_UsesOverride", ThemeSystemPrefersDarkUsesOverride);
+            Check("Theme_ApplyTo_IsIdempotent", ThemeApplyToIsIdempotent);
+            Check("Theme_Controls_ImplementIThemed", ThemeControlsImplementIThemed);
+
+            // 控件内容/事件契约（Task 11 review）：已有日志颜色不能被主题切换抹平，Text 与 TextChanged 必须转发。
+            Check("ThemedRichTextBox_ExistingRunsKeepTheirColours_AfterApplyTheme",
+                ThemedRichTextBoxExistingRunsKeepTheirColoursAfterApplyTheme);
+            Check("ThemedTextBox_TextChanged_ForwardsToBaseEvent", ThemedTextBoxTextChangedForwardsToBaseEvent);
+            Check("ThemedRichTextBox_Text_ForwardsToInner", ThemedRichTextBoxTextForwardsToInner);
+
+            // 主窗口骨架（Task 12a）：配置层“加载失败先备份”与复制/排序，以及不显示窗口的两套主题快照。
+            Check("Config_SaveAfterFailedLoad_BacksUpOriginal", ConfigSaveAfterFailedLoadBacksUpOriginal);
+            Check("Config_DuplicateItem_NamesAndInsertsAfterSource", ConfigDuplicateItemNamesAndInsertsAfterSource);
+            Check("Config_MoveItem_PersistsOrder", ConfigMoveItemPersistsOrder);
+            Check("Form_PostToUi_MarshalsBeforeHandleExists", FormPostToUiMarshalsBeforeHandleExists);
+            Check("Form_DuplicateKeepsListOrderInSyncWithManager", FormDuplicateKeepsListOrderInSyncWithManager);
+            Check("Form_RenameEditorAlignsWithPaintedName", FormRenameEditorAlignsWithPaintedName);
+            Check("Form_SnapshotRendersBothThemes", FormSnapshotRendersBothThemes);
         }
 
         // 配置模型用例全部使用绝对临时路径：--selftest 不改变当前目录。
@@ -3667,6 +3692,714 @@ namespace gostGUI
             }
         }
 
+        /// <summary>浅色/深色两套调色板不能写成一样：至少 8 组语义色必须不同。</summary>
+        private static void ThemePalettesDiffer()
+        {
+            Palette light = Palette.Light;
+            Palette dark = Palette.Dark;
+            Color[] lightColors =
+            {
+                light.Surface, light.SurfaceAlt, light.Border, light.TextPrimary,
+                light.TextMuted, light.Accent, light.AccentText, light.ButtonBg,
+                light.ButtonHover, light.ButtonPress, light.Success, light.Danger,
+                light.LogBg, light.LogStdout, light.LogStderr, light.LogSystem
+            };
+            Color[] darkColors =
+            {
+                dark.Surface, dark.SurfaceAlt, dark.Border, dark.TextPrimary,
+                dark.TextMuted, dark.Accent, dark.AccentText, dark.ButtonBg,
+                dark.ButtonHover, dark.ButtonPress, dark.Success, dark.Danger,
+                dark.LogBg, dark.LogStdout, dark.LogStderr, dark.LogSystem
+            };
+
+            int differing = 0;
+            for (int i = 0; i < lightColors.Length; i++)
+            {
+                if (lightColors[i] != darkColors[i])
+                {
+                    differing++;
+                }
+            }
+
+            Assert(differing >= 8, $"浅色/深色调色板应至少有 8 组语义色不同，实际只有 {differing} 组。");
+        }
+
+        /// <summary>system / light / dark 与 ThemeMode 往返；大小写容忍，非法与空值回落 System。</summary>
+        private static void ThemeModeParsingRoundTrips()
+        {
+            AssertEqual(ThemeMode.System, ThemeModes.Parse("system"));
+            AssertEqual(ThemeMode.Light, ThemeModes.Parse("light"));
+            AssertEqual(ThemeMode.Dark, ThemeModes.Parse("dark"));
+            AssertEqual(ThemeMode.Light, ThemeModes.Parse("  LIGHT  "));
+            AssertEqual("system", ThemeModes.ToConfigString(ThemeMode.System));
+            AssertEqual("light", ThemeModes.ToConfigString(ThemeMode.Light));
+            AssertEqual("dark", ThemeModes.ToConfigString(ThemeMode.Dark));
+
+            string[] illegalValues = { null, "", "   ", "auto", "darkk", "0" };
+            foreach (string value in illegalValues)
+            {
+                AssertEqual(ThemeMode.System, ThemeModes.Parse(value));
+            }
+        }
+
+        /// <summary>System 模式必须通过可注入的探针解析；重复设置同一模式也要重新解析。</summary>
+        private static void ThemeSystemPrefersDarkUsesOverride()
+        {
+            var manager = new ThemeManager();
+
+            manager.systemPrefersDarkOverride = () => true;
+            manager.Mode = ThemeMode.System;
+            Assert(ReferenceEquals(Palette.Dark, manager.Current), "System 模式下探针为深色时应取 Palette.Dark。");
+
+            manager.systemPrefersDarkOverride = () => false;
+            manager.Mode = ThemeMode.System;
+            Assert(ReferenceEquals(Palette.Light, manager.Current), "System 模式下探针为浅色时应取 Palette.Light。");
+
+            manager.Mode = ThemeMode.Dark;
+            Assert(ReferenceEquals(Palette.Dark, manager.Current), "显式 Dark 不应受探针影响。");
+
+            manager.Mode = ThemeMode.Light;
+            Assert(ReferenceEquals(Palette.Light, manager.Current), "显式 Light 不应受探针影响。");
+        }
+
+        /// <summary>ApplyTo 必须可重复调用且无副作用；控件颜色最终等于当前调色板的对应值。</summary>
+        private static void ThemeApplyToIsIdempotent()
+        {
+            RunOnSta(() =>
+            {
+                using (var host = new CardPanel())
+                {
+                    var button = new FlatButton();
+                    host.Controls.Add(button);
+
+                    var manager = new ThemeManager();
+                    manager.systemPrefersDarkOverride = () => false;
+                    manager.Mode = ThemeMode.Light;
+
+                    manager.ApplyTo(host);
+                    AssertEqual(Palette.Light.SurfaceAlt, button.BackColor);
+                    AssertEqual(Palette.Light.TextPrimary, button.ForeColor);
+
+                    manager.ApplyTo(host);
+                    AssertEqual(Palette.Light.SurfaceAlt, button.BackColor);
+                    AssertEqual(Palette.Light.TextPrimary, button.ForeColor);
+
+                    manager.Mode = ThemeMode.Dark;
+                    manager.ApplyTo(host);
+                    manager.ApplyTo(host);
+                    AssertEqual(Palette.Dark.SurfaceAlt, button.BackColor);
+                    AssertEqual(Palette.Dark.TextPrimary, button.ForeColor);
+
+                    manager.ApplyTo(null);
+                }
+            });
+        }
+
+        /// <summary>七个主题类型都必须实现 IThemed（六个 Control 子类 + 菜单渲染器）。</summary>
+        private static void ThemeControlsImplementIThemed()
+        {
+            Type[] themedTypes =
+            {
+                typeof(FlatButton), typeof(CardPanel), typeof(ToggleSwitch),
+                typeof(ThemedTextBox), typeof(ThemedRichTextBox), typeof(ThemedListBox),
+                typeof(ThemedMenuRenderer)
+            };
+
+            foreach (Type type in themedTypes)
+            {
+                Assert(typeof(IThemed).IsAssignableFrom(type), type.Name + " 必须实现 IThemed。");
+            }
+
+            Type[] controlTypes =
+            {
+                typeof(FlatButton), typeof(CardPanel), typeof(ToggleSwitch),
+                typeof(ThemedTextBox), typeof(ThemedRichTextBox), typeof(ThemedListBox)
+            };
+
+            foreach (Type type in controlTypes)
+            {
+                Assert(typeof(Control).IsAssignableFrom(type), type.Name + " 必须是 Control 子类。");
+            }
+        }
+
+        /// <summary>
+        /// 主题切换不得重写已有 run 的颜色；空日志仍要拿到主题默认前景色。
+        /// 读取 SelectionColor 是 reviewer 在 net48 上验证过的回读方式。
+        /// </summary>
+        private static void ThemedRichTextBoxExistingRunsKeepTheirColoursAfterApplyTheme()
+        {
+            RunOnSta(() =>
+            {
+                using (var log = new ThemedRichTextBox())
+                {
+                    Assert(log.Inner.Handle != IntPtr.Zero, "RichTextBox 句柄创建失败。");
+
+                    var manager = new ThemeManager();
+                    manager.systemPrefersDarkOverride = () => false;
+
+                    manager.Mode = ThemeMode.Dark;
+                    manager.ApplyTo(log);
+                    AssertEqual(Palette.Dark.LogStdout, log.Inner.ForeColor);
+
+                    log.AppendColored("A", Palette.Light.LogStdout);
+                    log.AppendColored("B", Palette.Light.LogStderr);
+                    log.AppendColored("C", Palette.Light.LogSystem);
+
+                    manager.Mode = ThemeMode.Light;
+                    manager.ApplyTo(log);
+                    AssertRunColour(log.Inner, 0, Palette.Light.LogStdout);
+                    AssertRunColour(log.Inner, 1, Palette.Light.LogStderr);
+                    AssertRunColour(log.Inner, 2, Palette.Light.LogSystem);
+
+                    manager.Mode = ThemeMode.Dark;
+                    manager.ApplyTo(log);
+                    AssertRunColour(log.Inner, 0, Palette.Light.LogStdout);
+                    AssertRunColour(log.Inner, 1, Palette.Light.LogStderr);
+                    AssertRunColour(log.Inner, 2, Palette.Light.LogSystem);
+                }
+            });
+        }
+
+        /// <summary>即使通过 Control 订阅，也必须收到内层 TextBox 的 TextChanged。</summary>
+        private static void ThemedTextBoxTextChangedForwardsToBaseEvent()
+        {
+            RunOnSta(() =>
+            {
+                using (var box = new ThemedTextBox())
+                {
+                    Control asControl = box;
+                    int changes = 0;
+                    asControl.TextChanged += (sender, args) => changes++;
+
+                    box.Text = "alpha";
+                    AssertEqual(1, changes);
+
+                    box.Inner.Text = "beta";
+                    AssertEqual(2, changes);
+                }
+            });
+        }
+
+        /// <summary>RichTextBox 的 Text 必须转发到内层，且日志区默认只读。</summary>
+        private static void ThemedRichTextBoxTextForwardsToInner()
+        {
+            RunOnSta(() =>
+            {
+                using (var log = new ThemedRichTextBox())
+                {
+                    log.Text = "日志内容";
+                    AssertEqual("日志内容", log.Text);
+                    AssertEqual("日志内容", log.Inner.Text);
+                    Assert(log.Inner.ReadOnly, "ThemedRichTextBox 的内层 RichTextBox 应默认只读。");
+                }
+            });
+        }
+
+        /// <summary>
+        /// 加载失败后第一次保存前必须把原文件备份成 config.json.bak（只备份一次），
+        /// 备份不了就拒绝保存，绝不静默覆盖用户那份解析不了的配置。
+        /// </summary>
+        private static void ConfigSaveAfterFailedLoadBacksUpOriginal()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                const string corrupt = "{ 这不是合法 JSON ";
+                File.WriteAllText(path, corrupt, new UTF8Encoding(false));
+
+                var manager = new ConfigurationManager(path);
+                Assert(!string.IsNullOrEmpty(manager.LoadError), "损坏的配置应记录中文加载错误。");
+                AssertEqual(path + ".bak", manager.BackupFilePath);
+                Assert(!File.Exists(manager.BackupFilePath), "加载阶段不应创建备份。");
+
+                ConfigItem added = manager.AddNewItem();
+                Assert(added != null, "AddNewItem 应返回新项。");
+                Assert(File.Exists(manager.BackupFilePath), "加载失败后的第一次保存前必须备份原文件。");
+                AssertEqual(corrupt, File.ReadAllText(manager.BackupFilePath, Encoding.UTF8));
+                AssertEqual("", manager.SaveError);
+
+                ConfigLoadResult reloaded = Common.LoadFrom(path);
+                Assert(reloaded.Ok, "覆盖后的配置应可解析：" + reloaded.Error);
+                AssertEqual(1, reloaded.Data.Items.Count);
+
+                // 只备份一次：第二次保存不再覆盖备份文件。
+                File.WriteAllText(manager.BackupFilePath, "keep-me", new UTF8Encoding(false));
+                manager.AddNewItem();
+                AssertEqual("keep-me", File.ReadAllText(manager.BackupFilePath, Encoding.UTF8));
+                AssertEqual("", manager.SaveError);
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>复制配置项：名字为“原名 副本”（重名加序号），插在源项后面，且不继承运行状态。</summary>
+        private static void ConfigDuplicateItemNamesAndInsertsAfterSource()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                var data = new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem
+                        {
+                            Name = "原始",
+                            Enable = true,
+                            Program = "gost.exe",
+                            Args = "-L 127.0.0.1:8080",
+                            WorkDir = "D:\\运行 目录",
+                            RunAsAdmin = true,
+                            Env = new Dictionary<string, string> { { "GOST_LOG", "debug" } }
+                        },
+                        new ConfigItem { Name = "第二", Program = "other.exe" }
+                    }
+                };
+                Assert(Common.SaveTo(data, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                ConfigItem source = manager.Items[0];
+                ConfigItem copy = manager.DuplicateItem(source);
+
+                Assert(copy != null, "复制应返回新项。");
+                AssertEqual("原始 副本", copy.Name);
+                AssertEqual(1, new List<ConfigItem>(manager.Items).IndexOf(copy));
+                AssertEqual(false, copy.Enable);
+                AssertEqual(source.Program, copy.Program);
+                AssertEqual(source.Args, copy.Args);
+                AssertEqual(source.WorkDir, copy.WorkDir);
+                AssertEqual(true, copy.RunAsAdmin);
+                Assert(copy.Env != null && copy.Env["GOST_LOG"] == "debug", "复制应带上环境变量。");
+                Assert(!ReferenceEquals(source.Env, copy.Env), "环境变量必须是独立副本。");
+
+                ConfigItem second = manager.DuplicateItem(source);
+                AssertEqual("原始 副本 2", second.Name);
+                Assert(manager.DuplicateItem(null) == null, "复制 null 应返回 null 而不是抛异常。");
+
+                ConfigLoadResult reloaded = Common.LoadFrom(path);
+                Assert(reloaded.Ok, "落盘后的配置应可解析：" + reloaded.Error);
+                AssertEqual(4, reloaded.Data.Items.Count);
+                // 每个副本都紧跟在源项后面：第二次复制后顺序是 原始 / 原始 副本 2 / 原始 副本 / 第二。
+                AssertEqual("原始 副本 2", reloaded.Data.Items[1].Name);
+                AssertEqual("原始 副本", reloaded.Data.Items[2].Name);
+                AssertEqual("第二", reloaded.Data.Items[3].Name);
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>上移/下移改变 ConfigurationManager.Items 的顺序并立即写盘；越界返回 false。</summary>
+        private static void ConfigMoveItemPersistsOrder()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                var data = new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "a", Program = "a.exe" },
+                        new ConfigItem { Name = "b", Program = "b.exe" },
+                        new ConfigItem { Name = "c", Program = "c.exe" }
+                    }
+                };
+                Assert(Common.SaveTo(data, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                Assert(manager.MoveItem(manager.Items[2], -1), "第三项上移应成功。");
+                AssertEqual("a", manager.Items[0].Name);
+                AssertEqual("c", manager.Items[1].Name);
+                AssertEqual("b", manager.Items[2].Name);
+
+                ConfigLoadResult reloaded = Common.LoadFrom(path);
+                Assert(reloaded.Ok, "落盘后的配置应可解析：" + reloaded.Error);
+                AssertEqual("c", reloaded.Data.Items[1].Name);
+                AssertEqual("b", reloaded.Data.Items[2].Name);
+
+                Assert(!manager.MoveItem(manager.Items[0], -1), "已在最前时上移应返回 false。");
+                Assert(!manager.MoveItem(manager.Items[2], 1), "已在最后时下移应返回 false。");
+                Assert(!manager.MoveItem(null, 1), "null 项应返回 false。");
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// 回归（review finding 1）：句柄还没有时，<c>InvokeRequired</c> 对任何线程都返回 false，
+        /// 于是“在不在 UI 线程”必须由构造函数记下的线程 id 判断。这里在窗口句柄建立之前
+        /// 从另一个线程走真实 PostToUi 路径投递一个回调，断言它不在调用线程上内联执行，
+        /// 并且在 CreateControl 建好句柄之后于 UI 线程上被执行。
+        /// </summary>
+        private static void FormPostToUiMarshalsBeforeHandleExists()
+        {
+            var state = new UiDispatchState();
+            var uiThread = new Thread(() =>
+            {
+                FormMain form = null;
+                try
+                {
+                    form = new FormMain(true);
+                    state.Form = form;
+                    state.UiThreadId = Thread.CurrentThread.ManagedThreadId;
+                    state.HandleExistedAtConstruction = form.IsHandleCreated;
+                    state.Ready.Set();
+                    state.Posted.Wait(TimeSpan.FromSeconds(30));
+
+                    // 句柄还没建好：跨线程投递绝对不能内联执行（这正是被 review 揪出的漏洞）。
+                    state.ExecutedBeforeHandle = state.Executed;
+
+                    // 隐藏窗体上 Control.CreateControl() 可能什么都不做，必须访问 Handle
+                    // 真正把句柄建出来（生产路径的 PrepareSnapshotScene 用 ForceHandles 做同一件事）。
+                    form.CreateControl();
+                    state.HandleCreated = form.Handle != IntPtr.Zero;
+                    state.ExecutedAfterHandle = state.Executed;
+                }
+                catch (Exception ex)
+                {
+                    state.Failure = ex;
+                }
+                finally
+                {
+                    state.Done.Set();
+                    try
+                    {
+                        form?.Dispose();
+                    }
+                    catch (Exception)
+                    {
+                        // 释放失败不影响断言结论。
+                    }
+                }
+            });
+            uiThread.IsBackground = true;
+            uiThread.SetApartmentState(ApartmentState.STA);
+            uiThread.Start();
+
+            try
+            {
+                Assert(state.Ready.Wait(TimeSpan.FromSeconds(60)), "窗体线程未就绪。");
+
+                var poster = new Thread(() =>
+                {
+                    try
+                    {
+                        state.PostedThreadId = Thread.CurrentThread.ManagedThreadId;
+                        state.Form.PostToUiForTest(() =>
+                        {
+                            state.Executed = true;
+                            state.ExecutedThreadId = Thread.CurrentThread.ManagedThreadId;
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        state.Failure = ex;
+                    }
+                    finally
+                    {
+                        state.Posted.Set();
+                    }
+                });
+                poster.IsBackground = true;
+                poster.Start();
+
+                Assert(state.Posted.Wait(TimeSpan.FromSeconds(30)), "后台线程投递未完成。");
+                Assert(state.Done.Wait(TimeSpan.FromSeconds(60)), "窗体线程未完成。");
+            }
+            finally
+            {
+                state.Ready.Set();
+                state.Posted.Set();
+                uiThread.Join(TimeSpan.FromSeconds(10));
+            }
+
+            if (state.Failure != null)
+            {
+                throw new SelfTestFailureException("投递用例异常：" + DescribeFailure(state.Failure));
+            }
+
+            Assert(state.UiThreadId != 0, "没有记录到 UI 线程 id。");
+            Assert(state.PostedThreadId != state.UiThreadId, "投递线程必须与 UI 线程不同，否则测不到跨线程路径。");
+            Assert(!state.HandleExistedAtConstruction,
+                "构造完成时不应该已经创建窗体句柄，否则这条用例覆盖不到“句柄建立前”的窗口。");
+            Assert(!state.ExecutedBeforeHandle,
+                "句柄未建立时，跨线程投递的回调不得在调用线程上内联执行（会在工作线程上碰 UI）。");
+            Assert(state.HandleCreated, "用例没能把窗体句柄建出来，无法验证排空行为。");
+            Assert(state.ExecutedAfterHandle, "句柄建立后应排空积压回调并执行。");
+            AssertEqual(state.UiThreadId, state.ExecutedThreadId);
+        }
+
+        /// <summary>
+        /// 回归（review finding 3）：复制的副本在配置里紧插在源项后面，界面顺序必须与之同步，
+        /// 否则列表底部多一行而 config.json 在源项后面，↑/↓ 会作用到用户看不到的行。
+        /// </summary>
+        private static void FormDuplicateKeepsListOrderInSyncWithManager()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                var data = new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "a", Program = "a.exe" },
+                        new ConfigItem { Name = "b", Program = "b.exe" },
+                        new ConfigItem { Name = "c", Program = "c.exe" }
+                    }
+                };
+                Assert(Common.SaveTo(data, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                RunOnSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        form.DuplicateForTest(manager.Items[0]);
+
+                        AssertEqual(4, manager.Items.Count);
+                        AssertEqual("a 副本", manager.Items[1].Name);
+
+                        IList<ConfigItem> listOrder = form.ListItemsForTest();
+                        AssertEqual(manager.Items.Count, listOrder.Count);
+                        for (int i = 0; i < manager.Items.Count; i++)
+                        {
+                            Assert(
+                                ReferenceEquals(manager.Items[i], listOrder[i]),
+                                "界面顺序必须与 config.json 顺序一致，第 " + i + " 项不一致：" +
+                                (listOrder[i] == null ? "null" : listOrder[i].Name) + " vs " + manager.Items[i].Name);
+                        }
+
+                        Assert(ReferenceEquals(listOrder[1], form.SelectedItem), "复制后应选中副本，且它的下标是 1。");
+                    }
+                });
+
+                ConfigLoadResult reloaded = Common.LoadFrom(path);
+                Assert(reloaded.Ok, "落盘后的配置应可解析：" + reloaded.Error);
+                AssertEqual("a 副本", reloaded.Data.Items[1].Name);
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// 回归（review minor）：行内重命名编辑框必须与绘制出来的名称对齐——
+        /// 不能压住左侧状态点，纵向要落在名称那一行里。ThemedListBox 的行几何是
+        /// padding 10 / 状态点 10 / gap 10，名称盒从行首 +3 DIP 起、高半行。
+        /// </summary>
+        private static void FormRenameEditorAlignsWithPaintedName()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                var data = new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "节点一", Program = "gost.exe", Args = "-L 127.0.0.1:8080" },
+                        new ConfigItem { Name = "节点二", Program = "gost.exe" }
+                    }
+                };
+                Assert(Common.SaveTo(data, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                RunOnSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        form.PrepareHandlesForTest();
+
+                        Rectangle row = form.ListRowBoundsForTest(0);
+                        Assert(row.Height > 0, "列表行矩形无效，无法验证编辑框对齐。");
+
+                        form.BeginRenameForTest(manager.Items[0]);
+                        Rectangle editor = form.RenameEditorBoundsForTest;
+                        Assert(editor.Height > 0 && editor.Width > 0, "行内编辑框没有显示出来。");
+
+                        // 行高按 44 DIP 缩放，据此把 DIP 换算成像素，不依赖具体 DPI。
+                        int scale = Math.Max(1, row.Height / 44);
+                        int dotRight = row.Left + (20 * scale);
+                        int nameTop = row.Top + (3 * scale);
+                        int nameBottom = row.Top + (22 * scale);
+
+                        Assert(editor.Left >= dotRight,
+                            "重命名编辑框压住了状态点：editor.Left=" + editor.Left + "，状态点右边缘=" + dotRight);
+                        Assert(editor.Top >= nameTop,
+                            "重命名编辑框比名称文本高：" + editor.Top + " < " + nameTop);
+                        Assert(editor.Bottom <= nameBottom + (2 * scale),
+                            "重命名编辑框超出名称行：" + editor.Bottom + " > " + nameBottom);
+                        Assert(editor.Right <= row.Right,
+                            "重命名编辑框超出列表宽度：" + editor.Right + " > " + row.Right);
+                    }
+                });
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// R42：在独立 STA 线程上跑与 --ui-snapshot 相同的例程，断言两张 1024×640 PNG 都是
+        /// 非空的真 PNG，且浅色与深色不是同一张图。
+        /// 只有“窗体根本创建不出来”时才 SKIP 并记 Notice（其余失败一律判 FAIL）。
+        /// </summary>
+        private static void FormSnapshotRendersBothThemes()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                var attempt = new SnapshotAttempt();
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        attempt.Ok = FormMain.TryRenderSnapshots(dir, out attempt.Error);
+                    }
+                    catch (Exception ex)
+                    {
+                        attempt.Failure = ex;
+                    }
+                });
+                thread.IsBackground = true;
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Start();
+
+                Assert(thread.Join(TimeSpan.FromSeconds(120)), "快照线程未在 120 秒内结束。");
+
+                if (attempt.Failure != null)
+                {
+                    string message = DescribeFailure(attempt.Failure);
+                    if (message.Contains("无法创建窗体"))
+                    {
+                        Notice("SKIP Form_SnapshotRendersBothThemes：当前环境无法创建窗体：" + message);
+                        return;
+                    }
+
+                    throw new SelfTestFailureException("快照渲染异常：" + message);
+                }
+
+                if (!attempt.Ok)
+                {
+                    string error = attempt.Error ?? "未知错误";
+                    if (error.StartsWith("无法创建窗体", StringComparison.Ordinal))
+                    {
+                        Notice("SKIP Form_SnapshotRendersBothThemes：当前环境无法创建窗体：" + error);
+                        return;
+                    }
+
+                    throw new SelfTestFailureException("快照渲染失败：" + error);
+                }
+
+                string lightPath = Path.Combine(dir, "form-light.png");
+                string darkPath = Path.Combine(dir, "form-dark.png");
+                AssertPng(lightPath, 1024, 640);
+                AssertPng(darkPath, 1024, 640);
+                Assert(
+                    !BytesEqual(File.ReadAllBytes(lightPath), File.ReadAllBytes(darkPath)),
+                    "浅色与深色快照不应逐字节相同（说明主题切换没生效）。");
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>断言文件存在、是 PNG、尺寸为 expectedWidth×expectedHeight，且内容非空。</summary>
+        private static void AssertPng(string path, int expectedWidth, int expectedHeight)
+        {
+            Assert(File.Exists(path), "快照文件未生成：" + path);
+            byte[] bytes = File.ReadAllBytes(path);
+            Assert(bytes.Length > 24, "快照文件内容为空：" + path);
+
+            byte[] signature = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+            for (int i = 0; i < signature.Length; i++)
+            {
+                AssertEqual(signature[i], bytes[i]);
+            }
+
+            // 8 字节签名 + 4 字节长度 + "IHDR"，随后是宽度/高度各 4 字节大端。
+            AssertEqual((byte)'I', bytes[12]);
+            AssertEqual((byte)'H', bytes[13]);
+            AssertEqual((byte)'D', bytes[14]);
+            AssertEqual((byte)'R', bytes[15]);
+
+            int width = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+            int height = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+            AssertEqual(expectedWidth, width);
+            AssertEqual(expectedHeight, height);
+        }
+
+        private static bool BytesEqual(byte[] left, byte[] right)
+        {
+            if (left == null || right == null || left.Length != right.Length)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < left.Length; i++)
+            {
+                if (left[i] != right[i])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static void AssertRunColour(RichTextBox box, int index, Color expected)
+        {
+            box.SelectionStart = index;
+            box.SelectionLength = 1;
+            AssertEqual(expected, box.SelectionColor);
+        }
+
+        /// <summary>在 STA 线程上执行控件用例；当前线程已是 STA 时直接执行，避免无谓的线程切换。</summary>
+        private static void RunOnSta(Action body)
+        {
+            if (body == null) throw new ArgumentNullException(nameof(body));
+
+            if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA)
+            {
+                body();
+                return;
+            }
+
+            Exception failure = null;
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    body();
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+            });
+            thread.IsBackground = true;
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+
+            if (failure != null)
+            {
+                throw new SelfTestFailureException("STA 线程中的断言失败：" + DescribeFailure(failure));
+            }
+        }
+
         /// <summary>夹具缺失/环境不满足时跳过用例，并把跳过原因写进 selftest 结果与控制台。</summary>
         private static void Notice(string message)
         {
@@ -3854,6 +4587,46 @@ namespace gostGUI
             {
                 // 进程即将退出，刷新失败不影响退出码与日志。
             }
+        }
+
+        /// <summary>快照用例的跨线程搬运盒：字段可以被线程内部的 out 参数直接写入。</summary>
+        private sealed class SnapshotAttempt
+        {
+            public bool Ok;
+
+            public string Error;
+
+            public Exception Failure;
+        }
+
+        /// <summary>投递用例（finding 1）的跨线程搬运盒。</summary>
+        private sealed class UiDispatchState
+        {
+            public readonly ManualResetEventSlim Ready = new ManualResetEventSlim(false);
+
+            public readonly ManualResetEventSlim Posted = new ManualResetEventSlim(false);
+
+            public readonly ManualResetEventSlim Done = new ManualResetEventSlim(false);
+
+            public FormMain Form;
+
+            public int UiThreadId;
+
+            public int PostedThreadId;
+
+            public int ExecutedThreadId;
+
+            public bool HandleExistedAtConstruction;
+
+            public bool HandleCreated;
+
+            public bool Executed;
+
+            public bool ExecutedBeforeHandle;
+
+            public bool ExecutedAfterHandle;
+
+            public Exception Failure;
         }
 
         private sealed class TestCase

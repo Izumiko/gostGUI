@@ -40,6 +40,8 @@
   </PropertyGroup>
   <PropertyGroup>
     <ApplicationIcon>smile-full.ico</ApplicationIcon>
+    <!-- R38：DPI 感知清单；asInvoker + PerMonitorV2（app.config 里再声明一次给 WinForms） -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="System" />
@@ -78,6 +80,17 @@
     <Compile Include="ProgramResolver.cs" />
     <Compile Include="LaunchPipeline.cs" />
     <Compile Include="Theme\ThemeMode.cs" />
+    <Compile Include="Theme\Palette.cs" />
+    <Compile Include="Theme\IThemed.cs" />
+    <Compile Include="Theme\ThemeManager.cs" />
+    <Compile Include="Theme\FlatButton.cs" />
+    <Compile Include="Theme\CardPanel.cs" />
+    <Compile Include="Theme\ToggleSwitch.cs" />
+    <Compile Include="Theme\ThemedTextBox.cs" />
+    <Compile Include="Theme\ThemedRichTextBox.cs" />
+    <Compile Include="Theme\ThemedListBox.cs" />
+    <Compile Include="Theme\ThemedMenuRenderer.cs" />
+    <Compile Include="Theme\UiPreview.cs" />
     <Compile Include="Shared\*.cs" />
     <Compile Include="FormMain.cs">
       <SubType>Form</SubType>
@@ -92,10 +105,6 @@
     <Compile Include="RunnerClient.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
-    <EmbeddedResource Include="FormMain.resx">
-      <DependentUpon>FormMain.cs</DependentUpon>
-      <SubType>Designer</SubType>
-    </EmbeddedResource>
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
@@ -110,6 +119,7 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="app.config" />
+    <None Include="app.manifest" />
     <None Include="Properties\Settings.settings">
       <Generator>SettingsSingleFileGenerator</Generator>
       <LastGenOutput>Settings.Designer.cs</LastGenOutput>

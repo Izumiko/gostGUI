@@ -1,4 +1,8 @@
-﻿﻿namespace gostGUI
+using System;
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace gostGUI
 {
     partial class FormMain
     {
@@ -7,347 +11,679 @@
         /// </summary>
         private System.ComponentModel.IContainer components = null;
 
+        // ---------------- 顶部条 ----------------
+        private TableLayoutPanel _topBar;
+        private Label _titleLabel;
+        private CardPanel _badge;
+        private Label _badgeLabel;
+        private Panel _themeHost;
+        private FlatButton _themeButton;
+        private ContextMenuStrip _themeMenu;
+        private ToolStripMenuItem _themeMenuSystem;
+        private ToolStripMenuItem _themeMenuLight;
+        private ToolStripMenuItem _themeMenuDark;
+
+        // ---------------- 载入/保存错误横幅 ----------------
+        private Panel _bannerPanel;
+        private Label _bannerLabel;
+        private FlatButton _bannerCloseButton;
+
+        // ---------------- 主体两栏 ----------------
+        private TableLayoutPanel _contentLayout;
+
+        // 左栏
+        private Panel _leftPanel;
+        private Panel _leftHeader;
+        private Label _listHeaderLabel;
+        private FlatButton _collapseButton;
+        private CardPanel _listCard;
+        private ThemedListBox _configList;
+        private ConfigStatusStrip _collapsedStrip;
+        private Panel _leftButtons;
+        private TableLayoutPanel _itemButtonRow;
+        private TableLayoutPanel _allButtonRow;
+        private Panel _autoStartRow;
+        private FlatButton _newButton;
+        private FlatButton _duplicateButton;
+        private FlatButton _deleteButton;
+        private FlatButton _moveUpButton;
+        private FlatButton _moveDownButton;
+        private FlatButton _startAllButton;
+        private FlatButton _stopAllButton;
+        private ToggleSwitch _autoStartToggle;
+        private FlatButton _exitButton;
+        private ContextMenuStrip _listMenu;
+        private ToolStripMenuItem _menuStart;
+        private ToolStripMenuItem _menuStop;
+        private ToolStripMenuItem _menuRename;
+        private ToolStripMenuItem _menuNew;
+        private ToolStripMenuItem _menuDelete;
+        private TextBox _renameBox;
+
+        // 右栏
+        private TableLayoutPanel _rightColumn;
+        private CardPanel _launchCard;
+        private Panel _launchHeader;
+        private Label _launchTitleLabel;
+        private Panel _slotPanel;
+        private Label _slotLabel;
+        private Label _detailSummaryLabel;
+        private TableLayoutPanel _launchButtonRow;
+        private FlatButton _startButton;
+        private FlatButton _stopButton;
+        private CardPanel _outputCard;
+        private Panel _outputHeader;
+        private Label _outputTitleLabel;
+        private FlatButton _clearLogButton;
+        private FlatButton _copyLogButton;
+        private Panel _logHost;
+        private TextBox _logTemplate;
+
+        // 托盘
+        private NotifyIcon _notifyIcon;
+        private ContextMenuStrip _trayMenu;
+        private ToolStripMenuItem _trayStartAll;
+        private ToolStripMenuItem _trayStopAll;
+        private ToolStripMenuItem _trayExit;
+
+        // 资源
+        private Timer _elapsedTimer;
+        private Font _baseFont;
+        private Font _titleFont;
+        private Font _sectionFont;
+        private Font _monoFont;
+        private Icon _appIcon;
+
         /// <summary>
         /// 清理所有正在使用的资源。
         /// </summary>
         /// <param name="disposing">如果应释放托管资源，为 true；否则为 false。</param>
         protected override void Dispose(bool disposing)
         {
-            if (disposing && (components != null))
+            if (disposing)
             {
-                components.Dispose();
+                if (components != null)
+                {
+                    components.Dispose();
+                }
+
+                DisposeManagedExtras();
             }
+
             base.Dispose(disposing);
         }
 
-        #region Windows 窗体设计器生成的代码
-
         /// <summary>
-        /// 设计器支持所需的方法 - 不要修改
-        /// 使用代码编辑器修改此方法的内容。
+        /// 布局全部由代码搭建：TableLayoutPanel + Dock/Anchor，不使用 resx 坐标。
+        /// 所有尺寸以 96 DPI 为基线，按启动时的系统 DPI 等比换算（Dip）。
         /// </summary>
         private void InitializeComponent()
         {
-            this.components = new System.ComponentModel.Container();
-            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(FormMain));
-            this.label1 = new System.Windows.Forms.Label();
-            this.textBox1 = new System.Windows.Forms.TextBox();
-            this.button_start = new System.Windows.Forms.Button();
-            this.textBox_log = new System.Windows.Forms.TextBox();
-            this.notifyIcon1 = new System.Windows.Forms.NotifyIcon(this.components);
-            this.contextMenuStrip1 = new System.Windows.Forms.ContextMenuStrip(this.components);
-            this.startToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
-            this.stopToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
-            this.exitToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
-            this.textBox_Arg = new System.Windows.Forms.TextBox();
-            this.label2 = new System.Windows.Forms.Label();
-            this.button_stop = new System.Windows.Forms.Button();
-            this.button_select = new System.Windows.Forms.Button();
-            this.button_Clear = new System.Windows.Forms.Button();
-            this.label3 = new System.Windows.Forms.Label();
-            this.backgroundWorker1 = new System.ComponentModel.BackgroundWorker();
-            this.groupBox1 = new System.Windows.Forms.GroupBox();
-            this.groupBox2 = new System.Windows.Forms.GroupBox();
-            this.checkBox1_autostart = new System.Windows.Forms.CheckBox();
-            this.button_stopAll = new System.Windows.Forms.Button();
-            this.button_StartAll = new System.Windows.Forms.Button();
-            this.button_Exit = new System.Windows.Forms.Button();
-            this.listBox1 = new System.Windows.Forms.ListBox();
-            this.startToolStripMenuItem_listbox = new System.Windows.Forms.ToolStripMenuItem();
-            this.stopToolStripMenuItem_listbox = new System.Windows.Forms.ToolStripMenuItem();
-            this.contextMenuStrip_listbox = new System.Windows.Forms.ContextMenuStrip(this.components);
-            this.activeToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
-            this.editToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
-            this.newToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
-            this.deleteToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
-            this.groupBox3 = new System.Windows.Forms.GroupBox();
-            this.contextMenuStrip1.SuspendLayout();
-            this.groupBox1.SuspendLayout();
-            this.groupBox2.SuspendLayout();
-            this.contextMenuStrip_listbox.SuspendLayout();
-            this.groupBox3.SuspendLayout();
-            this.SuspendLayout();
-            // 
-            // label1
-            // 
-            resources.ApplyResources(this.label1, "label1");
-            this.label1.Name = "label1";
-            // 
-            // textBox1
-            // 
-            this.textBox1.AllowDrop = true;
-            resources.ApplyResources(this.textBox1, "textBox1");
-            this.textBox1.Name = "textBox1";
-            this.textBox1.DragDrop += new System.Windows.Forms.DragEventHandler(this.textBox1_DragDrop);
-            this.textBox1.DragEnter += new System.Windows.Forms.DragEventHandler(this.textBox1_DragEnter);
-            // 
-            // button_start
-            // 
-            resources.ApplyResources(this.button_start, "button_start");
-            this.button_start.Name = "button_start";
-            this.button_start.UseVisualStyleBackColor = true;
-            this.button_start.Click += new System.EventHandler(this.buttonStart_Click);
-            // 
-            // textBox_log
-            // 
-            this.textBox_log.BackColor = System.Drawing.SystemColors.ActiveCaptionText;
-            this.textBox_log.ForeColor = System.Drawing.SystemColors.Window;
-            this.textBox_log.HideSelection = false;
-            resources.ApplyResources(this.textBox_log, "textBox_log");
-            this.textBox_log.Name = "textBox_log";
-            this.textBox_log.ReadOnly = true;
-            // 
-            // notifyIcon1
-            // 
-            resources.ApplyResources(this.notifyIcon1, "notifyIcon1");
-            this.notifyIcon1.MouseClick += new System.Windows.Forms.MouseEventHandler(this.notifyIcon1_MouseClick);
-            this.notifyIcon1.DoubleClick += new System.EventHandler(this.notifyIcon1_DoubleClick);
-            // 
-            // contextMenuStrip1
-            // 
-            this.contextMenuStrip1.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
-            this.startToolStripMenuItem,
-            this.stopToolStripMenuItem,
-            this.exitToolStripMenuItem});
-            this.contextMenuStrip1.Name = "contextMenuStrip1";
-            resources.ApplyResources(this.contextMenuStrip1, "contextMenuStrip1");
-            // 
-            // startToolStripMenuItem
-            // 
-            this.startToolStripMenuItem.Name = "startToolStripMenuItem";
-            resources.ApplyResources(this.startToolStripMenuItem, "startToolStripMenuItem");
-            this.startToolStripMenuItem.Click += new System.EventHandler(this.startToolStripMenuItem_Click);
-            // 
-            // stopToolStripMenuItem
-            // 
-            this.stopToolStripMenuItem.Name = "stopToolStripMenuItem";
-            resources.ApplyResources(this.stopToolStripMenuItem, "stopToolStripMenuItem");
-            this.stopToolStripMenuItem.Click += new System.EventHandler(this.stopToolStripMenuItem_Click);
-            // 
-            // exitToolStripMenuItem
-            // 
-            this.exitToolStripMenuItem.Name = "exitToolStripMenuItem";
-            resources.ApplyResources(this.exitToolStripMenuItem, "exitToolStripMenuItem");
-            this.exitToolStripMenuItem.Click += new System.EventHandler(this.exitToolStripMenuItem_Click);
-            // 
-            // textBox_Arg
-            // 
-            this.textBox_Arg.AcceptsReturn = true;
-            this.textBox_Arg.AcceptsTab = true;
-            this.textBox_Arg.AllowDrop = true;
-            resources.ApplyResources(this.textBox_Arg, "textBox_Arg");
-            this.textBox_Arg.Name = "textBox_Arg";
-            // 
-            // label2
-            // 
-            resources.ApplyResources(this.label2, "label2");
-            this.label2.Name = "label2";
-            // 
-            // button_stop
-            // 
-            resources.ApplyResources(this.button_stop, "button_stop");
-            this.button_stop.Name = "button_stop";
-            this.button_stop.UseMnemonic = false;
-            this.button_stop.UseVisualStyleBackColor = true;
-            this.button_stop.Click += new System.EventHandler(this.buttonStop_Click);
-            // 
-            // button_select
-            // 
-            resources.ApplyResources(this.button_select, "button_select");
-            this.button_select.Name = "button_select";
-            this.button_select.UseVisualStyleBackColor = true;
-            this.button_select.Click += new System.EventHandler(this.button_select_Click);
-            // 
-            // button_Clear
-            // 
-            resources.ApplyResources(this.button_Clear, "button_Clear");
-            this.button_Clear.Name = "button_Clear";
-            this.button_Clear.UseVisualStyleBackColor = true;
-            this.button_Clear.Click += new System.EventHandler(this.clearButton_Click);
-            // 
-            // label3
-            // 
-            resources.ApplyResources(this.label3, "label3");
-            this.label3.Name = "label3";
-            // 
-            // groupBox1
-            // 
-            this.groupBox1.Controls.Add(this.button_Clear);
-            this.groupBox1.Controls.Add(this.button_start);
-            this.groupBox1.Controls.Add(this.textBox_log);
-            this.groupBox1.Controls.Add(this.button_stop);
-            this.groupBox1.Controls.Add(this.textBox_Arg);
-            this.groupBox1.Controls.Add(this.label3);
-            this.groupBox1.Controls.Add(this.label2);
-            resources.ApplyResources(this.groupBox1, "groupBox1");
-            this.groupBox1.Name = "groupBox1";
-            this.groupBox1.TabStop = false;
-            // 
-            // groupBox2
-            // 
-            this.groupBox2.Controls.Add(this.checkBox1_autostart);
-            this.groupBox2.Controls.Add(this.button_stopAll);
-            this.groupBox2.Controls.Add(this.button_StartAll);
-            this.groupBox2.Controls.Add(this.button_Exit);
-            this.groupBox2.Controls.Add(this.listBox1);
-            resources.ApplyResources(this.groupBox2, "groupBox2");
-            this.groupBox2.Name = "groupBox2";
-            this.groupBox2.TabStop = false;
-            // 
-            // checkBox1_autostart
-            // 
-            resources.ApplyResources(this.checkBox1_autostart, "checkBox1_autostart");
-            this.checkBox1_autostart.Name = "checkBox1_autostart";
-            this.checkBox1_autostart.UseVisualStyleBackColor = true;
-            this.checkBox1_autostart.Click += new System.EventHandler(this.checkBox1_autostart_Click);
-            // 
-            // button_stopAll
-            // 
-            resources.ApplyResources(this.button_stopAll, "button_stopAll");
-            this.button_stopAll.Name = "button_stopAll";
-            this.button_stopAll.UseVisualStyleBackColor = true;
-            this.button_stopAll.Click += new System.EventHandler(this.button_stopAll_Click);
-            // 
-            // button_StartAll
-            // 
-            resources.ApplyResources(this.button_StartAll, "button_StartAll");
-            this.button_StartAll.Name = "button_StartAll";
-            this.button_StartAll.UseVisualStyleBackColor = true;
-            this.button_StartAll.Click += new System.EventHandler(this.button_StartAll_Click);
-            // 
-            // button_Exit
-            // 
-            resources.ApplyResources(this.button_Exit, "button_Exit");
-            this.button_Exit.Name = "button_Exit";
-            this.button_Exit.UseVisualStyleBackColor = true;
-            this.button_Exit.Click += new System.EventHandler(this.button_Exit_Click);
-            // 
-            // listBox1
-            // 
-            this.listBox1.ContextMenuStrip = this.contextMenuStrip_listbox;
-            this.listBox1.DrawMode = System.Windows.Forms.DrawMode.OwnerDrawFixed;
-            this.listBox1.FormattingEnabled = true;
-            resources.ApplyResources(this.listBox1, "listBox1");
-            this.listBox1.Name = "listBox1";
-            this.listBox1.MouseClick += new System.Windows.Forms.MouseEventHandler(this.listBox1_MouseClick);
-            this.listBox1.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.listBox1_DrawItem);
-            this.listBox1.SelectedIndexChanged += new System.EventHandler(this.listBox1_SelectedIndexChanged);
-            this.listBox1.MouseDoubleClick += new System.Windows.Forms.MouseEventHandler(this.listBox1_DoubleClick);
-            this.listBox1.MouseDown += new System.Windows.Forms.MouseEventHandler(this.listBox1_MouseDown);
-            // 
-            // startToolStripMenuItem_listbox
-            // 
-            this.startToolStripMenuItem_listbox.Name = "startToolStripMenuItem_listbox";
-            resources.ApplyResources(this.startToolStripMenuItem_listbox, "startToolStripMenuItem_listbox");
-            this.startToolStripMenuItem_listbox.Click += new System.EventHandler(this.startToolStripMenuItem_listbox_Click);
-            // 
-            // stopToolStripMenuItem_listbox
-            // 
-            this.stopToolStripMenuItem_listbox.Name = "stopToolStripMenuItem_listbox";
-            resources.ApplyResources(this.stopToolStripMenuItem_listbox, "stopToolStripMenuItem_listbox");
-            this.stopToolStripMenuItem_listbox.Click += new System.EventHandler(this.stopToolStripMenuItem_listbox_Click);
-            // 
-            // contextMenuStrip_listbox
-            // 
-            this.contextMenuStrip_listbox.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
-            this.startToolStripMenuItem_listbox,
-            this.stopToolStripMenuItem_listbox,
-            this.activeToolStripMenuItem,
-            this.editToolStripMenuItem,
-            this.newToolStripMenuItem,
-            this.deleteToolStripMenuItem});
-            this.contextMenuStrip_listbox.Name = "contextMenuStrip_listbox";
-            resources.ApplyResources(this.contextMenuStrip_listbox, "contextMenuStrip_listbox");
-            this.contextMenuStrip_listbox.Opening += new System.ComponentModel.CancelEventHandler(this.contextMenuStrip_listbox_Opening);
-            // 
-            // activeToolStripMenuItem
-            // 
-            this.activeToolStripMenuItem.Name = "activeToolStripMenuItem";
-            resources.ApplyResources(this.activeToolStripMenuItem, "activeToolStripMenuItem");
-            this.activeToolStripMenuItem.Click += new System.EventHandler(this.selectToolStripMenuItem_Click);
-            // 
-            // editToolStripMenuItem
-            // 
-            this.editToolStripMenuItem.Name = "editToolStripMenuItem";
-            resources.ApplyResources(this.editToolStripMenuItem, "editToolStripMenuItem");
-            this.editToolStripMenuItem.Click += new System.EventHandler(this.editToolStripMenuItem_Click);
-            // 
-            // newToolStripMenuItem
-            // 
-            this.newToolStripMenuItem.Name = "newToolStripMenuItem";
-            resources.ApplyResources(this.newToolStripMenuItem, "newToolStripMenuItem");
-            this.newToolStripMenuItem.Click += new System.EventHandler(this.newToolStripMenuItem_Click);
-            // 
-            // deleteToolStripMenuItem
-            // 
-            this.deleteToolStripMenuItem.Name = "deleteToolStripMenuItem";
-            resources.ApplyResources(this.deleteToolStripMenuItem, "deleteToolStripMenuItem");
-            this.deleteToolStripMenuItem.Click += new System.EventHandler(this.deleteToolStripMenuItem_Click);
-            // 
-            // groupBox3
-            // 
-            this.groupBox3.Controls.Add(this.textBox1);
-            this.groupBox3.Controls.Add(this.label1);
-            this.groupBox3.Controls.Add(this.button_select);
-            resources.ApplyResources(this.groupBox3, "groupBox3");
-            this.groupBox3.Name = "groupBox3";
-            this.groupBox3.TabStop = false;
-            // 
-            // FormMain
-            // 
-            resources.ApplyResources(this, "$this");
-            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.Controls.Add(this.groupBox3);
-            this.Controls.Add(this.groupBox2);
-            this.Controls.Add(this.groupBox1);
-            this.Name = "FormMain";
-            this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.FormMain_FormClosing);
-            this.FormClosed += new System.Windows.Forms.FormClosedEventHandler(this.FormMain_FormClosed);
-            this.Load += new System.EventHandler(this.FormMain_Load);
-            this.contextMenuStrip1.ResumeLayout(false);
-            this.groupBox1.ResumeLayout(false);
-            this.groupBox1.PerformLayout();
-            this.groupBox2.ResumeLayout(false);
-            this.groupBox2.PerformLayout();
-            this.contextMenuStrip_listbox.ResumeLayout(false);
-            this.groupBox3.ResumeLayout(false);
-            this.groupBox3.PerformLayout();
-            this.ResumeLayout(false);
+            int dpi = ResolveStartupDpi();
+            int Dip(int value)
+            {
+                return (int)Math.Round(value * dpi / 96.0, MidpointRounding.AwayFromZero);
+            }
 
+            this.components = new System.ComponentModel.Container();
+            this.SuspendLayout();
+
+            // ---------------- 窗体 ----------------
+            this.Text = "gostGUI v1.9";
+            this.Name = "FormMain";
+            this.AutoScaleMode = AutoScaleMode.Font;
+            this.ClientSize = new Size(Dip(1024), Dip(640));
+            this.MinimumSize = new Size(Dip(880), Dip(560));
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.DoubleBuffered = true;
+            this.BackColor = Palette.Light.Surface;
+            this.ForeColor = Palette.Light.TextPrimary;
+
+            _baseFont = CreateBaseFont();
+            this.Font = _baseFont;
+            _titleFont = new Font(_baseFont.FontFamily, 12f, FontStyle.Bold, GraphicsUnit.Point);
+            _sectionFont = new Font(_baseFont.FontFamily, 10f, FontStyle.Bold, GraphicsUnit.Point);
+            _monoFont = CreateMonoFont(9.5f);
+            _appIcon = LoadApplicationIcon();
+            if (_appIcon != null)
+            {
+                this.Icon = _appIcon;
+            }
+
+            // ---------------- 顶部条：标题 / 权限徽标 / 主题三态 ----------------
+            _topBar = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = Dip(52),
+                ColumnCount = 3,
+                RowCount = 1,
+                BackColor = Palette.Light.Surface,
+                Margin = new Padding(0)
+            };
+            _topBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(210)));
+            _topBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(150)));
+            _topBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _topBar.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            _titleLabel = new Label
+            {
+                Text = "gostGUI v1.9",
+                AutoSize = false,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = _titleFont,
+                Margin = new Padding(Dip(16), 0, 0, 0)
+            };
+
+            _badge = new CardPanel
+            {
+                Dock = DockStyle.Fill,
+                BorderRadius = Dip(10),
+                Padding = new Padding(Dip(10), Dip(2), Dip(10), Dip(2)),
+                Margin = new Padding(0, Dip(12), Dip(8), Dip(12))
+            };
+            _badgeLabel = new Label
+            {
+                Text = "权限：标准",
+                AutoSize = false,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = _baseFont
+            };
+            _badge.Controls.Add(_badgeLabel);
+
+            _themeHost = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(0, Dip(10), Dip(16), Dip(10)),
+                Margin = new Padding(0)
+            };
+            _themeButton = new FlatButton
+            {
+                Dock = DockStyle.Right,
+                Width = Dip(140),
+                Text = "跟随系统 ▼",
+                Variant = ButtonVariant.Secondary,
+                Font = _baseFont
+            };
+            _themeButton.Click += ThemeButton_Click;
+            _themeHost.Controls.Add(_themeButton);
+
+            _themeMenuSystem = new ToolStripMenuItem("跟随系统");
+            _themeMenuSystem.Click += (sender, e) => SetThemeMode(ThemeMode.System);
+            _themeMenuLight = new ToolStripMenuItem("浅色");
+            _themeMenuLight.Click += (sender, e) => SetThemeMode(ThemeMode.Light);
+            _themeMenuDark = new ToolStripMenuItem("深色");
+            _themeMenuDark.Click += (sender, e) => SetThemeMode(ThemeMode.Dark);
+            _themeMenu = new ContextMenuStrip(this.components);
+            _themeMenu.Items.AddRange(new ToolStripItem[]
+            {
+                _themeMenuSystem, _themeMenuLight, _themeMenuDark
+            });
+
+            _topBar.Controls.Add(_titleLabel, 0, 0);
+            _topBar.Controls.Add(_badge, 1, 0);
+            _topBar.Controls.Add(_themeHost, 2, 0);
+
+            // ---------------- 载入/保存错误横幅（默认隐藏） ----------------
+            _bannerPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = Dip(44),
+                Visible = false,
+                Padding = new Padding(Dip(12), Dip(4), Dip(8), Dip(4)),
+                BackColor = Palette.Light.SurfaceAlt
+            };
+            _bannerLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Palette.Light.Danger
+            };
+            _bannerCloseButton = new FlatButton
+            {
+                Dock = DockStyle.Right,
+                Width = Dip(72),
+                Text = "关闭",
+                Variant = ButtonVariant.Ghost,
+                Font = _baseFont
+            };
+            _bannerCloseButton.Click += (sender, e) => HideBanner();
+            _bannerPanel.Controls.Add(_bannerLabel);
+            _bannerPanel.Controls.Add(_bannerCloseButton);
+
+            // ---------------- 主体两栏 ----------------
+            _contentLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                Padding = new Padding(Dip(12), Dip(12), Dip(12), Dip(12)),
+                BackColor = Palette.Light.Surface
+            };
+            _contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(300)));
+            _contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            // ---------------- 左栏 ----------------
+            _leftPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, Dip(8), 0),
+                BackColor = Palette.Light.Surface
+            };
+
+            _leftHeader = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = Dip(30),
+                BackColor = Palette.Light.Surface
+            };
+            _listHeaderLabel = new Label
+            {
+                Text = "配置 (0)",
+                AutoSize = false,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = _sectionFont
+            };
+            _collapseButton = new FlatButton
+            {
+                Dock = DockStyle.Right,
+                Width = Dip(30),
+                Text = "«",
+                Variant = ButtonVariant.Ghost,
+                Font = _baseFont
+            };
+            _collapseButton.Click += CollapseButton_Click;
+            _leftHeader.Controls.Add(_listHeaderLabel);
+            _leftHeader.Controls.Add(_collapseButton);
+
+            _listCard = new CardPanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(Dip(6), Dip(6), Dip(6), Dip(6)),
+                Margin = new Padding(0)
+            };
+            _configList = new ThemedListBox
+            {
+                Dock = DockStyle.Fill,
+                IntegralHeight = false
+            };
+            _configList.IsRunningSelector = item => IsItemRunning(item as ConfigItem);
+            _configList.SubtitleSelector = item => SubtitleFor(item as ConfigItem);
+            _configList.StatusTextSelector = item => StatusTextFor(item as ConfigItem);
+            _configList.SelectedIndexChanged += ConfigList_SelectedIndexChanged;
+            _configList.MouseClick += ConfigList_MouseClick;
+            _configList.MouseDoubleClick += ConfigList_MouseDoubleClick;
+            _configList.MouseDown += ConfigList_MouseDown;
+            _listCard.Controls.Add(_configList);
+
+            _collapsedStrip = new ConfigStatusStrip
+            {
+                Dock = DockStyle.Fill,
+                Visible = false,
+                Margin = new Padding(0)
+            };
+            _collapsedStrip.ItemProvider = ListItems;
+            _collapsedStrip.RunningSelector = item => IsItemRunning(item);
+            _collapsedStrip.StatusSelector = item => StatusTextFor(item);
+            _collapsedStrip.MouseClick += CollapsedStrip_MouseClick;
+
+            // 左栏底部三行按钮：新建/复制/删除/上移/下移、全部启动/全部停止、开机自启 + 退出
+            _leftButtons = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = Dip(120),
+                BackColor = Palette.Light.Surface
+            };
+
+            _itemButtonRow = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = Dip(34),
+                ColumnCount = 5,
+                RowCount = 1,
+                Margin = new Padding(0),
+                BackColor = Palette.Light.Surface
+            };
+            for (int i = 0; i < 5; i++)
+            {
+                _itemButtonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20f));
+            }
+
+            _itemButtonRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            _newButton = CreateRowButton("新建", ButtonVariant.Primary, Dip(2));
+            _duplicateButton = CreateRowButton("复制", ButtonVariant.Secondary, Dip(2));
+            _deleteButton = CreateRowButton("删除", ButtonVariant.Danger, Dip(2));
+            _moveUpButton = CreateRowButton("↑", ButtonVariant.Secondary, Dip(2));
+            _moveDownButton = CreateRowButton("↓", ButtonVariant.Secondary, Dip(2));
+            _newButton.Click += NewButton_Click;
+            _duplicateButton.Click += DuplicateButton_Click;
+            _deleteButton.Click += DeleteButton_Click;
+            _moveUpButton.Click += MoveUpButton_Click;
+            _moveDownButton.Click += MoveDownButton_Click;
+            _itemButtonRow.Controls.Add(_newButton, 0, 0);
+            _itemButtonRow.Controls.Add(_duplicateButton, 1, 0);
+            _itemButtonRow.Controls.Add(_deleteButton, 2, 0);
+            _itemButtonRow.Controls.Add(_moveUpButton, 3, 0);
+            _itemButtonRow.Controls.Add(_moveDownButton, 4, 0);
+
+            _allButtonRow = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = Dip(40),
+                ColumnCount = 2,
+                RowCount = 1,
+                Padding = new Padding(0, Dip(6), 0, 0),
+                Margin = new Padding(0),
+                BackColor = Palette.Light.Surface
+            };
+            _allButtonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            _allButtonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            _allButtonRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            _startAllButton = CreateRowButton("全部启动", ButtonVariant.Primary, Dip(2));
+            _stopAllButton = CreateRowButton("全部停止", ButtonVariant.Secondary, Dip(2));
+            _startAllButton.Click += (sender, e) => StartAll(true);
+            _stopAllButton.Click += (sender, e) => StopAll();
+            _allButtonRow.Controls.Add(_startAllButton, 0, 0);
+            _allButtonRow.Controls.Add(_stopAllButton, 1, 0);
+
+            _autoStartRow = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = Dip(40),
+                Padding = new Padding(0, Dip(6), 0, 0),
+                Margin = new Padding(0),
+                BackColor = Palette.Light.Surface
+            };
+            _autoStartToggle = new ToggleSwitch
+            {
+                Text = "开机自启",
+                Dock = DockStyle.Left,
+                AutoSize = true,
+                Font = _baseFont
+            };
+            _autoStartToggle.CheckedChanged += AutoStartToggle_CheckedChanged;
+            _exitButton = new FlatButton
+            {
+                Dock = DockStyle.Right,
+                Width = Dip(80),
+                Text = "退出",
+                Variant = ButtonVariant.Ghost,
+                Font = _baseFont
+            };
+            _exitButton.Click += (sender, e) => ExitApplication();
+            _autoStartRow.Controls.Add(_autoStartToggle);
+            _autoStartRow.Controls.Add(_exitButton);
+
+            // Dock 顺序：后加入的先贴边
+            _leftButtons.Controls.Add(_autoStartRow);
+            _leftButtons.Controls.Add(_allButtonRow);
+            _leftButtons.Controls.Add(_itemButtonRow);
+
+            _leftPanel.Controls.Add(_listCard);
+            _leftPanel.Controls.Add(_collapsedStrip);
+            _leftPanel.Controls.Add(_leftButtons);
+            _leftPanel.Controls.Add(_leftHeader);
+
+            // 列表右键菜单：启动 / 停止 / 重命名 / 新建 / 删除
+            _menuStart = new ToolStripMenuItem("启动");
+            _menuStart.Click += (sender, e) => ToggleOrStart(SelectedItem);
+            _menuStop = new ToolStripMenuItem("停止");
+            _menuStop.Click += (sender, e) => StopItems(SelectedItemAsList());
+            _menuRename = new ToolStripMenuItem("重命名");
+            _menuRename.Click += (sender, e) => BeginRename(SelectedItem);
+            _menuNew = new ToolStripMenuItem("新建");
+            _menuNew.Click += NewButton_Click;
+            _menuDelete = new ToolStripMenuItem("删除");
+            _menuDelete.Click += DeleteButton_Click;
+            _listMenu = new ContextMenuStrip(this.components);
+            _listMenu.Items.AddRange(new ToolStripItem[]
+            {
+                _menuStart, _menuStop, new ToolStripSeparator(), _menuRename, _menuNew, _menuDelete
+            });
+            _listMenu.Opening += ListMenu_Opening;
+            _configList.ContextMenuStrip = _listMenu;
+
+            _renameBox = new TextBox
+            {
+                Visible = false,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = _baseFont
+            };
+            _renameBox.KeyDown += RenameBox_KeyDown;
+            _renameBox.Leave += RenameBox_Leave;
+
+            // ---------------- 右栏 ----------------
+            _rightColumn = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                Margin = new Padding(Dip(8), 0, 0, 0),
+                BackColor = Palette.Light.Surface
+            };
+            _rightColumn.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _rightColumn.RowStyles.Add(new RowStyle(SizeType.Percent, 56f));
+            _rightColumn.RowStyles.Add(new RowStyle(SizeType.Percent, 44f));
+
+            // 上：启动设置卡片（12b 在此填字段）
+            _launchCard = new CardPanel
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 0, Dip(8))
+            };
+            _launchHeader = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = Dip(30),
+                BackColor = Palette.Light.SurfaceAlt
+            };
+            _launchTitleLabel = new Label
+            {
+                Text = "启动设置",
+                AutoSize = false,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = _sectionFont
+            };
+            _launchHeader.Controls.Add(_launchTitleLabel);
+
+            _slotPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(Dip(10), Dip(10), Dip(10), Dip(10)),
+                BackColor = Palette.Light.Surface
+            };
+            _slotLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Text = "（任务 12b 在此填充：程序 / 参数 / 工作目录 / 环境变量 / 以管理员身份运行）",
+                ForeColor = Palette.Light.TextMuted
+            };
+            _slotPanel.Controls.Add(_slotLabel);
+
+            _detailSummaryLabel = new Label
+            {
+                Dock = DockStyle.Bottom,
+                Height = Dip(26),
+                AutoSize = false,
+                AutoEllipsis = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Text = "当前没有选中的配置项。"
+            };
+
+            _launchButtonRow = new TableLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                Height = Dip(40),
+                ColumnCount = 3,
+                RowCount = 1,
+                Margin = new Padding(0),
+                BackColor = Palette.Light.SurfaceAlt
+            };
+            _launchButtonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _launchButtonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(96)));
+            _launchButtonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dip(96)));
+            _launchButtonRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            _stopButton = new FlatButton
+            {
+                Dock = DockStyle.Fill,
+                Text = "停止",
+                Variant = ButtonVariant.Secondary,
+                Font = _baseFont,
+                Margin = new Padding(Dip(2), Dip(2), Dip(2), Dip(2))
+            };
+            _stopButton.Click += (sender, e) => StopItems(SelectedItemAsList());
+            _startButton = new FlatButton
+            {
+                Dock = DockStyle.Fill,
+                Text = "启动",
+                Variant = ButtonVariant.Primary,
+                Font = _baseFont,
+                Margin = new Padding(Dip(2), Dip(2), Dip(2), Dip(2))
+            };
+            _startButton.Click += (sender, e) => ToggleOrStart(SelectedItem);
+            // 设计稿顺序：[启动] [停止]（左→右）
+            _launchButtonRow.Controls.Add(_startButton, 1, 0);
+            _launchButtonRow.Controls.Add(_stopButton, 2, 0);
+
+            _launchCard.Controls.Add(_slotPanel);
+            _launchCard.Controls.Add(_detailSummaryLabel);
+            _launchCard.Controls.Add(_launchButtonRow);
+            _launchCard.Controls.Add(_launchHeader);
+
+            // 下：输出卡片（12b 在此放带颜色的日志控件）
+            _outputCard = new CardPanel
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, Dip(8), 0, 0)
+            };
+            _outputHeader = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = Dip(30),
+                BackColor = Palette.Light.SurfaceAlt
+            };
+            _outputTitleLabel = new Label
+            {
+                Text = "输出",
+                AutoSize = false,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = _sectionFont
+            };
+            _clearLogButton = new FlatButton
+            {
+                Dock = DockStyle.Right,
+                Width = Dip(72),
+                Text = "清空",
+                Variant = ButtonVariant.Ghost,
+                Font = _baseFont
+            };
+            _clearLogButton.Click += ClearLogButton_Click;
+            _copyLogButton = new FlatButton
+            {
+                Dock = DockStyle.Right,
+                Width = Dip(72),
+                Text = "复制",
+                Variant = ButtonVariant.Ghost,
+                Font = _baseFont
+            };
+            _copyLogButton.Click += CopyLogButton_Click;
+            _outputHeader.Controls.Add(_outputTitleLabel);
+            _outputHeader.Controls.Add(_clearLogButton);
+            _outputHeader.Controls.Add(_copyLogButton);
+
+            _logHost = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Palette.Light.LogBg
+            };
+            _logTemplate = new TextBox
+            {
+                Multiline = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.Vertical,
+                WordWrap = false,
+                BorderStyle = BorderStyle.None,
+                Visible = false,
+                Font = _monoFont,
+                BackColor = Palette.Light.LogBg,
+                ForeColor = Palette.Light.LogStdout
+            };
+            _logHost.Controls.Add(_logTemplate);
+            _logHost.Resize += LogHost_Resize;
+
+            _outputCard.Controls.Add(_logHost);
+            _outputCard.Controls.Add(_outputHeader);
+
+            _rightColumn.Controls.Add(_launchCard, 0, 0);
+            _rightColumn.Controls.Add(_outputCard, 0, 1);
+
+            _contentLayout.Controls.Add(_leftPanel, 0, 0);
+            _contentLayout.Controls.Add(_rightColumn, 1, 0);
+
+            // ---------------- 托盘 ----------------
+            _trayStartAll = new ToolStripMenuItem("启动全部");
+            _trayStartAll.Click += (sender, e) => StartAll(true);
+            _trayStopAll = new ToolStripMenuItem("停止全部");
+            _trayStopAll.Click += (sender, e) => StopAll();
+            _trayExit = new ToolStripMenuItem("退出");
+            _trayExit.Click += (sender, e) => ExitApplication();
+            _trayMenu = new ContextMenuStrip(this.components);
+            _trayMenu.Items.AddRange(new ToolStripItem[]
+            {
+                _trayStartAll, _trayStopAll, new ToolStripSeparator(), _trayExit
+            });
+
+            _notifyIcon = new NotifyIcon(this.components)
+            {
+                Text = "gostGUI v1.9",
+                ContextMenuStrip = _trayMenu,
+                Icon = _appIcon,
+                Visible = false
+            };
+            _notifyIcon.MouseClick += NotifyIcon_MouseClick;
+            _notifyIcon.DoubleClick += NotifyIcon_DoubleClick;
+
+            // ---------------- 计时器：刷新运行时长 ----------------
+            _elapsedTimer = new Timer(this.components)
+            {
+                Interval = 1000
+            };
+            _elapsedTimer.Tick += ElapsedTimer_Tick;
+
+            // ---------------- 窗体级事件 ----------------
+            this.FormClosing += FormMain_FormClosing;
+            this.FormClosed += FormMain_FormClosed;
+
+            // Dock 顺序：后加入的先贴边（Fill 在最前面加入）
+            this.Controls.Add(_contentLayout);
+            this.Controls.Add(_bannerPanel);
+            this.Controls.Add(_topBar);
+
+            this.ResumeLayout(false);
+            this.PerformLayout();
         }
 
-        #endregion
-
-        private System.Windows.Forms.Label label1;
-        private System.Windows.Forms.TextBox textBox1;
-        private System.Windows.Forms.Button button_start;
-        private System.Windows.Forms.TextBox textBox_log;
-        private System.Windows.Forms.NotifyIcon notifyIcon1;
-        private System.Windows.Forms.ContextMenuStrip contextMenuStrip1;
-        private System.Windows.Forms.ToolStripMenuItem exitToolStripMenuItem;
-        private System.Windows.Forms.TextBox textBox_Arg;
-        private System.Windows.Forms.Label label2;
-        private System.Windows.Forms.Button button_stop;
-        private System.Windows.Forms.Button button_select;
-        private System.Windows.Forms.ToolStripMenuItem startToolStripMenuItem;
-        private System.Windows.Forms.ToolStripMenuItem stopToolStripMenuItem;
-        private System.Windows.Forms.Button button_Clear;
-        private System.Windows.Forms.Label label3;
-        private System.ComponentModel.BackgroundWorker backgroundWorker1;
-        private System.Windows.Forms.GroupBox groupBox1;
-        private System.Windows.Forms.GroupBox groupBox2;
-        private System.Windows.Forms.ListBox listBox1;
-        private System.Windows.Forms.GroupBox groupBox3;
-        private System.Windows.Forms.ContextMenuStrip contextMenuStrip_listbox;
-        private System.Windows.Forms.ToolStripMenuItem activeToolStripMenuItem;
-        private System.Windows.Forms.ToolStripMenuItem editToolStripMenuItem;
-        private System.Windows.Forms.ToolStripMenuItem newToolStripMenuItem;
-        private System.Windows.Forms.ToolStripMenuItem deleteToolStripMenuItem;
-        private System.Windows.Forms.Button button_Exit;
-        private System.Windows.Forms.CheckBox checkBox1_autostart;
-        private System.Windows.Forms.Button button_stopAll;
-        private System.Windows.Forms.Button button_StartAll;
-        private System.Windows.Forms.ToolStripMenuItem startToolStripMenuItem_listbox;
-        private System.Windows.Forms.ToolStripMenuItem stopToolStripMenuItem_listbox;
+        /// <summary>左栏按钮行的统一外观（20% 等分格子里的扁平按钮）。</summary>
+        private FlatButton CreateRowButton(string text, ButtonVariant variant, int horizontalMargin)
+        {
+            return new FlatButton
+            {
+                Dock = DockStyle.Fill,
+                Text = text,
+                Variant = variant,
+                Font = _baseFont,
+                Margin = new Padding(horizontalMargin, 0, horizontalMargin, 0)
+            };
+        }
     }
 }
