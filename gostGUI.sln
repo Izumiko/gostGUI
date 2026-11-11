@@ -5,6 +5,8 @@ VisualStudioVersion = 17.14.36414.22 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "gostGUI", "gostGUI\gostGUI.csproj", "{0D2CE34D-3A44-4903-868A-C7B7D02E615B}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "gostGUI.Runner", "gostGUI.Runner\gostGUI.Runner.csproj", "{DDB7BFEB-0141-4DC0-80CB-859C98E24906}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +17,10 @@ Global
 		{0D2CE34D-3A44-4903-868A-C7B7D02E615B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0D2CE34D-3A44-4903-868A-C7B7D02E615B}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0D2CE34D-3A44-4903-868A-C7B7D02E615B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DDB7BFEB-0141-4DC0-80CB-859C98E24906}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DDB7BFEB-0141-4DC0-80CB-859C98E24906}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DDB7BFEB-0141-4DC0-80CB-859C98E24906}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DDB7BFEB-0141-4DC0-80CB-859C98E24906}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

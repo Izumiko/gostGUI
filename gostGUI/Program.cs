@@ -2,18 +2,33 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace gostGUI
 {
     static class Program
     {
+        // WinExe 启动时没有自己的控制台；--selftest 时尽力接上父进程的控制台，让输出可见。
+        private const int AttachParentProcess = -1;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AttachConsole(int processId);
+
         /// <summary>
         /// 应用程序的主入口点。
         /// </summary>
         [STAThread]
-        static void Main()
+        static int Main(string[] args)
         {
+            // 隐藏的自检开关：不初始化 WinForms，退出码与 selftest.log 才是权威结果。
+            if (args.Any(a => a == "--selftest"))
+            {
+                // 接不上控制台就算了，此时只剩退出码与 selftest.log 可用。
+                AttachConsole(AttachParentProcess);
+                return SelfTest.RunAll();
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
@@ -35,6 +50,7 @@ namespace gostGUI
             Directory.SetCurrentDirectory(fi.DirectoryName);
 
             Application.Run(new FormMain());
+            return 0;
         }
     }
 }

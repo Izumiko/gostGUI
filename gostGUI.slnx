@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="gostGUI/gostGUI.csproj" Id="0d2ce34d-3a44-4903-868a-c7b7d02e615b" />
+  <Project Path="gostGUI.Runner/gostGUI.Runner.csproj" Id="ddb7bfeb-0141-4dc0-80cb-859c98e24906" />
+</Solution>
