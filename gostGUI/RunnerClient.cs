@@ -13,7 +13,8 @@ using gostGUI.Shared;
 namespace gostGUI
 {
     /// <summary>
-    /// 中转进程的启动模式。Task 8c 只实现 SameIntegrity；Elevated / StandardUser 由 Task 9/10 替换为真实分支。
+    /// 中转进程的启动模式：SameIntegrity 直接 CreateProcess 同级拉起；Elevated 用 ShellExecuteEx(runas)
+    /// 穿过 UAC；StandardUser 借 explorer.exe 的标准用户令牌降权拉起。选路由 ProcessManager 的权限矩阵决定。
     /// </summary>
     public enum RunnerLaunchMode
     {
@@ -31,6 +32,19 @@ namespace gostGUI
     {
         /// <summary>普通（同权限）场景下等待 runner 连上管道的上限。</summary>
         private const int ConnectTimeoutMs = 15000;
+
+        /// <summary>
+        /// 跨权限场景（提权 / 降权）的连线上限，比同权限路径宽裕。
+        /// 注意它**不**覆盖用户在 UAC 弹窗里做决定的时间：ShellExecuteEx 同步阻塞到用户点完为止，
+        /// 这里只覆盖 runner 启动之后连上管道的时间（R35）。
+        /// </summary>
+        private const int CrossIntegrityConnectTimeoutMs = 60000;
+
+        /// <summary>
+        /// 降权路径（CreateProcessWithTokenW）的 lpCommandLine 上限。文档写的是 1024 字符（创建者不同，
+        /// CreateProcessAsUser 才是 32767），这里留 24 字符余量按 1000 判定：超过就必须改走 --spec-file。
+        /// </summary>
+        internal const int StandardUserCommandLineLimit = 1000;
 
         /// <summary>ready + started 两个握手帧共用的总上限。</summary>
         private const int HandshakeTimeoutMs = 15000;
@@ -196,16 +210,14 @@ namespace gostGUI
                 throw new InvalidOperationException("启动请求无效：" + request.Error);
             }
 
-            // 模式检查必须早于路径检查：Elevated / StandardUser 的“暂不支持”是模式本身的结论，
-            // 不能因为 runner 路径暂时不在而报成另一种错误。
+            // 三种模式走同一段装配：spec 编码、管道服务器、握手、帧翻译与停止逻辑都不重复；
+            // 只有“怎么创建 runner 进程”不同（StartRunnerProcess 里分流）。
             switch (mode)
             {
                 case RunnerLaunchMode.SameIntegrity:
-                    break;
                 case RunnerLaunchMode.Elevated:
-                    throw new NotSupportedException("暂不支持以管理员身份启动中转进程（Task 9 实现）。");
                 case RunnerLaunchMode.StandardUser:
-                    throw new NotSupportedException("暂不支持以标准用户身份启动中转进程（Task 10 实现）。");
+                    break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(mode), mode, "未知的中转进程启动模式。");
             }
@@ -221,12 +233,22 @@ namespace gostGUI
             }
 
             ct.ThrowIfCancellationRequested();
-            return StartCoreAsync(request, runnerPath, baseDir, ct);
+
+            // 跨权限路径（提权 / 降权）都按 60s 等连接：同权限路径保持 15s，避免掩盖 runner 的真实故障。
+            int connectTimeoutMs = mode == RunnerLaunchMode.SameIntegrity
+                ? ConnectTimeoutMs
+                : CrossIntegrityConnectTimeoutMs;
+            return StartCoreAsync(request, mode, runnerPath, baseDir, connectTimeoutMs, ct);
         }
 
         /// <summary>
         /// 发送 stop 并等待退出：超时后杀掉 runner（它自己的 Job 会带走子进程树），再兜底上报 Exited(-1)。
         /// 幂等，且按契约绝不抛异常；重复调用返回同一个停止任务。
+        /// <para>
+        /// 提权会话由标准权限的 UI 进程持有 Process 对象，跨完整性级别 Kill 通常会被拒绝；真正的停止
+        /// 依赖 stop 帧让 runner 自己 TerminateJobObject，以及调用方释放会话时关闭管道、让 runner 在
+        /// EOF 时自杀。<see cref="Dispose"/> 的关管道路径是最后一道兜底。
+        /// </para>
         /// </summary>
         public Task StopAsync(TimeSpan timeout)
         {
@@ -254,8 +276,8 @@ namespace gostGUI
             DisposeRunnerHandle(true, RunnerExitWaitMs);
         }
 
-        private static async Task<RunnerSession> StartCoreAsync(LaunchRequest request, string runnerPath,
-            string baseDir, CancellationToken ct)
+        private static async Task<RunnerSession> StartCoreAsync(LaunchRequest request, RunnerLaunchMode mode,
+            string runnerPath, string baseDir, int connectTimeoutMs, CancellationToken ct)
         {
             string nonce = Guid.NewGuid().ToString("N");
             var spec = new LaunchSpec
@@ -270,11 +292,14 @@ namespace gostGUI
                 EnvOverrides = CopyOverrides(request.EnvOverrides)
             };
 
+            // spec 的传输方式在建 spec 的同一处决定，管道服务器与临时文件的口径因此永远一致：
+            // 降权路径的 lpCommandLine 上限只有 1024 字符，超过就必须走 --spec-file（见 NeedsTempSpecFile）。
+            bool grantInteractiveUser = mode == RunnerLaunchMode.StandardUser;
             string tempSpecPath = null;
             string runnerArguments;
-            if (LaunchSpecCodec.NeedsTempFile(spec))
+            if (NeedsTempSpecFile(spec, mode, runnerPath))
             {
-                tempSpecPath = WriteSpecFile(spec);
+                tempSpecPath = WriteSpecFile(spec, grantInteractiveUser);
                 runnerArguments = "--spec-file \"" + tempSpecPath + "\"";
             }
             else
@@ -285,14 +310,17 @@ namespace gostGUI
             NamedPipeServerStream server = null;
             Process runner = null;
             StreamReader reader = null;
+            Task connectionTask = null;
             try
             {
-                server = CreatePipeServer(spec.Pipe);
-                Task connectionTask = server.WaitForConnectionAsync(ct);
+                server = CreatePipeServer(spec.Pipe, grantInteractiveUser);
+                connectionTask = server.WaitForConnectionAsync(ct);
 
-                runner = StartRunnerProcess(runnerPath, runnerArguments, baseDir);
+                // 跨权限路径的进程创建分别换成 ShellExecuteEx(runas) 与 explorer 令牌降权；
+                // --spec / --spec-file 的装配由上面共用，管道服务器、握手、帧翻译与停止逻辑完全一致。
+                runner = StartRunnerProcess(runnerPath, runnerArguments, baseDir, mode);
 
-                await WaitForConnectionAsync(connectionTask, ct).ConfigureAwait(false);
+                await WaitForConnectionAsync(connectionTask, ct, connectTimeoutMs).ConfigureAwait(false);
 
                 reader = new StreamReader(server, new UTF8Encoding(false), false, 4096, true);
                 DateTime deadline = DateTime.UtcNow.AddMilliseconds(HandshakeTimeoutMs);
@@ -380,6 +408,12 @@ namespace gostGUI
             }
             catch
             {
+                // 连接等待可能因服务器被关闭而失败；先观察掉，避免未观察异常在 GC 时冒出来。
+                if (connectionTask != null)
+                {
+                    ObserveFailure(connectionTask);
+                }
+
                 TryDispose(reader);
                 TryDispose(server);
                 KillAndDisposeRunner(runner);
@@ -392,28 +426,85 @@ namespace gostGUI
             }
         }
 
-        private static NamedPipeServerStream CreatePipeServer(string pipeName)
+        /// <summary>
+        /// 决定这次 spec 走 <c>--spec &lt;base64&gt;</c> 还是 <c>--spec-file &lt;临时文件&gt;</c>。纯函数，供自检直接断言。
+        /// <para>
+        /// 1) Base64 超过 <see cref="LaunchSpecCodec.CommandLineLimit"/>（8000）时所有模式都必须走临时文件；
+        /// 2) 降权路径（StandardUser）的上限更严：<c>CreateProcessWithTokenW</c> 的 lpCommandLine 文档上限是
+        ///    1024 字符，超过 <see cref="StandardUserCommandLineLimit"/> 时会以 87 (ERROR_INVALID_PARAMETER)
+        ///    失败，而 1314 的兜底不会救这种失败——所以必须提前改走临时文件。
+        /// </para>
+        /// </summary>
+        internal static bool NeedsTempSpecFile(LaunchSpec spec, RunnerLaunchMode mode, string runnerPath)
         {
-            var security = new PipeSecurity();
-            SecurityIdentifier currentUser = CurrentUserSid();
-            if (currentUser == null)
+            if (LaunchSpecCodec.NeedsTempFile(spec))
+            {
+                return true;
+            }
+
+            if (mode != RunnerLaunchMode.StandardUser)
+            {
+                return false;
+            }
+
+            // 与 ElevationManager 拼命令行的方式保持一致：runner 路径按需加引号 + 空格 + "--spec " + Base64。
+            string commandLine = ElevationManager.QuoteIfNeeded(runnerPath) + " --spec "
+                                 + LaunchSpecCodec.ToBase64(spec);
+            return commandLine.Length > StandardUserCommandLineLimit;
+        }
+
+        private static NamedPipeServerStream CreatePipeServer(string pipeName, bool grantInteractiveUser)
+        {
+            if (CurrentUserSid() == null)
             {
                 throw new InvalidOperationException("无法获取当前用户，不能创建中转进程命名管道。");
             }
 
-            // 显式 DACL：当前用户 + 管理员 + SYSTEM 全控。Task 9/10 跨权限拉起 runner 时，默认 DACL 会漏掉
-            // UAC 里输入的另一管理员账号，导致 runner 连不上管道。
-            security.AddAccessRule(new PipeAccessRule(currentUser, PipeAccessRights.FullControl,
-                AccessControlType.Allow));
-            security.AddAccessRule(new PipeAccessRule(
-                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
-                PipeAccessRights.FullControl, AccessControlType.Allow));
-            security.AddAccessRule(new PipeAccessRule(
-                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
-                PipeAccessRights.FullControl, AccessControlType.Allow));
-
             return new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous, 4096, 4096, security);
+                PipeOptions.Asynchronous, 4096, 4096, BuildPipeSecurity(grantInteractiveUser));
+        }
+
+        /// <summary>命名管道/临时 spec 文件共用的显式 ACL 主体（见 <see cref="BuildAclSids"/>）。</summary>
+        internal static PipeSecurity BuildPipeSecurity(bool grantInteractiveUser)
+        {
+            var security = new PipeSecurity();
+            foreach (SecurityIdentifier sid in BuildAclSids(grantInteractiveUser))
+            {
+                security.AddAccessRule(new PipeAccessRule(sid, PipeAccessRights.FullControl,
+                    AccessControlType.Allow));
+            }
+
+            return security;
+        }
+
+        /// <summary>
+        /// 管道与临时 spec 文件的显式 ACL 主体：当前用户 + <c>BUILTIN\Administrators</c> + <c>SYSTEM</c>；
+        /// 降权场景再加 <c>INTERACTIVE</c>（S-1-5-4）。
+        /// <para>
+        /// 为什么降权场景必须加 INTERACTIVE：跨账号提权（over-the-shoulder，用户在 UAC 里输入了另一个管理员账号）
+        /// 时 gostGUI 以那个管理员账号运行，而降权出来的 runner 是**当前交互用户**的身份。默认 DACL 只覆盖创建者，
+        /// 交互用户既读不到临时 spec 也连不上管道，runner 会起来后静默失败。授予 INTERACTIVE 后同账号场景
+        /// 不受影响（那条规则本来就被“当前用户”覆盖），其它模式不加这条规则。
+        /// </para>
+        /// </summary>
+        internal static List<SecurityIdentifier> BuildAclSids(bool grantInteractiveUser)
+        {
+            var sids = new List<SecurityIdentifier>();
+            SecurityIdentifier currentUser = CurrentUserSid();
+            if (currentUser != null)
+            {
+                sids.Add(currentUser);
+            }
+
+            sids.Add(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+            sids.Add(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null));
+
+            if (grantInteractiveUser)
+            {
+                sids.Add(new SecurityIdentifier(WellKnownSidType.InteractiveSid, null));
+            }
+
+            return sids;
         }
 
         /// <summary>当前用户 SID；拿不到时返回 null，由调用方给出中文错误或放弃 ACL。</summary>
@@ -425,15 +516,32 @@ namespace gostGUI
             }
         }
 
-        private static Process StartRunnerProcess(string runnerPath, string arguments, string baseDir)
+        private static Process StartRunnerProcess(string runnerPath, string arguments, string baseDir,
+            RunnerLaunchMode mode)
         {
+            string workingDirectory = string.IsNullOrWhiteSpace(baseDir) ? Common.GetApplicationPath() : baseDir;
+
+            if (mode == RunnerLaunchMode.Elevated)
+            {
+                // UAC 取消会在这里抛 Win32Exception(1223)，由 ProcessManager 映射成“已取消管理员授权”；
+                // 其它失败同样带上原生错误码，绝不在这里降级成同权限启动。
+                return ElevationManager.LaunchRunnerElevated(runnerPath, arguments, workingDirectory);
+            }
+
+            if (mode == RunnerLaunchMode.StandardUser)
+            {
+                // 降权路径：借 explorer.exe 的标准用户令牌创建 runner，子进程不继承本进程的管理员权限。
+                // 失败抛带真实错误码的 Win32Exception（登记在案的预期失败码是 1314/5），同样绝不降级成同权限启动。
+                return ElevationManager.LaunchRunnerAsStandardUser(runnerPath, arguments, workingDirectory);
+            }
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = runnerPath,
                 Arguments = arguments,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                WorkingDirectory = string.IsNullOrWhiteSpace(baseDir) ? Common.GetApplicationPath() : baseDir
+                WorkingDirectory = workingDirectory
             };
 
             Process runner = Process.Start(startInfo);
@@ -445,9 +553,9 @@ namespace gostGUI
             return runner;
         }
 
-        private static async Task WaitForConnectionAsync(Task connectionTask, CancellationToken ct)
+        private static async Task WaitForConnectionAsync(Task connectionTask, CancellationToken ct, int timeoutMs)
         {
-            Task timeoutTask = Task.Delay(ConnectTimeoutMs, ct);
+            Task timeoutTask = Task.Delay(timeoutMs, ct);
             Task winner = await Task.WhenAny(connectionTask, timeoutTask).ConfigureAwait(false);
             if (winner != connectionTask)
             {
@@ -456,7 +564,7 @@ namespace gostGUI
                     throw new OperationCanceledException(ct);
                 }
 
-                throw new TimeoutException("中转进程在 " + (ConnectTimeoutMs / 1000) + " 秒内未连上命名管道。");
+                throw new TimeoutException("中转进程在 " + (timeoutMs / 1000) + " 秒内未连上命名管道。");
             }
 
             await connectionTask.ConfigureAwait(false);
@@ -544,30 +652,30 @@ namespace gostGUI
             return copy;
         }
 
-        private static string WriteSpecFile(LaunchSpec spec)
+        private static string WriteSpecFile(LaunchSpec spec, bool grantInteractiveUser)
         {
             string path = Path.Combine(Path.GetTempPath(),
                 "gostgui-spec-" + Guid.NewGuid().ToString("N") + ".json");
             File.WriteAllText(path, LaunchSpecCodec.ToJson(spec), new UTF8Encoding(false));
-            TryApplySpecFileAcl(path);
+            TryApplySpecFileAcl(path, grantInteractiveUser);
             return path;
         }
 
         /// <summary>
-        /// 给临时 spec 文件补显式 ACL（当前用户 + 管理员 + SYSTEM 全控），与管道 DACL 保持一致。
-        /// 同权限路径不需要它，但 Task 9/10 的跨账号提权路径需要 runner 以外的那一方能读到文件。
-        /// 失败只影响跨权限场景，不影响当前用户本次启动，因此尽力而为。
+        /// 给临时 spec 文件补显式 ACL（与管道 DACL 同一份主体，见 <see cref="BuildAclSids"/>）。
+        /// 同权限路径不需要它，但跨权限路径需要 runner 那一方能读到文件；降权场景还要覆盖 INTERACTIVE
+        /// （over-the-shoulder 时 runner 是交互用户身份）。失败只影响跨权限场景，不影响当前用户本次启动，因此尽力而为。
         /// </summary>
-        private static void TryApplySpecFileAcl(string path)
+        private static void TryApplySpecFileAcl(string path, bool grantInteractiveUser)
         {
             try
             {
                 FileSecurity security = File.GetAccessControl(path);
-                AddFileFullControl(security, CurrentUserSid());
-                AddFileFullControl(security,
-                    new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
-                AddFileFullControl(security,
-                    new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null));
+                foreach (SecurityIdentifier sid in BuildAclSids(grantInteractiveUser))
+                {
+                    AddFileFullControl(security, sid);
+                }
+
                 File.SetAccessControl(path, security);
             }
             catch (Exception)

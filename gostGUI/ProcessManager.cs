@@ -114,6 +114,10 @@ namespace gostGUI
             }
         }
 
+        /// <summary>
+        /// 按权限矩阵启动一个配置项：权限匹配时在 UI 进程内直连，权限不匹配时改走中转进程（提权 / 降权）。
+        /// R17：整段逻辑包在兜底里，任何异常都只记一条 System 日志并返回 false，绝不漏给界面线程。
+        /// </summary>
         public bool StartProcess(ConfigItem configItem)
         {
             if (configItem == null)
@@ -122,7 +126,27 @@ namespace gostGUI
             }
 
             LastStartErrorIsElevationRequired = false;
+            try
+            {
+                return StartProcessCore(configItem);
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    LogSystem(configItem, "启动失败：" + ex.Message);
+                }
+                catch (Exception)
+                {
+                    // 连日志回调都抛异常时只能吞掉：StartProcess 的契约是绝不抛。
+                }
 
+                return false;
+            }
+        }
+
+        private bool StartProcessCore(ConfigItem configItem)
+        {
             lock (_lock)
             {
                 if (IsProcessRunning(configItem))
@@ -137,6 +161,7 @@ namespace gostGUI
             StartSequence sequence = null;
             string startupError = null;
             bool elevationRequired = false;
+            RunnerLaunchMode? launchMode = null;
 
             // 父环境快照由 ChildEnvironment 在它自己的静态锁内完成：并发启动时，
             // 快照绝不会看到另一个项临时写进本进程环境的覆盖值。
@@ -151,29 +176,72 @@ namespace gostGUI
             {
                 startupError = "启动失败：" + request.Error;
             }
-            else if (IsForceRunnerEnabled())
+            else
             {
-                // 调试开关：同权限直起中转进程，用于在没有 UAC 的情况下验证管道与 runner 全链路。
-                // sequence 在这里创建，runner 的 Exited 回调与直连路径共用同一套 started/exit 时序闩。
+                // 调试开关优先：GOSTGUI_FORCE_RUNNER=1 时全部走同权限中转，用于在没有 UAC 的情况下
+                // 验证管道与 runner 全链路。其余情况严格按权限矩阵选路，没有“权限不匹配也直连”的回落。
+                launchMode = IsForceRunnerEnabled()
+                    ? RunnerLaunchMode.SameIntegrity
+                    : DecideMode(ElevationManager.IsProcessElevated(), configItem.RunAsAdmin);
+            }
+
+            if (!string.IsNullOrEmpty(startupError))
+            {
+                // 管线已给出中文失败原因：跳过启动，直接进入下面的失败收尾。
+            }
+            else if (launchMode.HasValue)
+            {
                 try
                 {
                     sequence = new StartSequence();
                     string runnerPath = Path.Combine(Common.GetApplicationPath(), RunnerFileName);
-                    session = RunnerSession.StartAsync(request, RunnerLaunchMode.SameIntegrity,
+
+                    if (launchMode.Value == RunnerLaunchMode.Elevated)
+                    {
+                        // 记下这是一次 UAC 提权请求：取消/失败时日志里能看出启动卡在授权环节。
+                        TryLogSystem(configItem, "正在请求管理员授权（UAC），请在弹窗中确认。");
+                    }
+
+                    session = RunnerSession.StartAsync(request, launchMode.Value,
                             runnerPath, Common.GetApplicationPath(), CancellationToken.None)
                         .GetAwaiter().GetResult();
                     if (session == null)
                     {
                         startupError = "启动失败：中转进程没有返回有效会话。";
                     }
+                    else if (launchMode.Value == RunnerLaunchMode.Elevated)
+                    {
+                        // 提权路径的子进程身份由 UAC 令牌决定（可能是在 UAC 里输入的另一管理员账号），
+                        // 这一行按设计 §6.4 显式说明，避免用户对 %APPDATA% / 盘符权限困惑。
+                        TryLogSystem(configItem,
+                            "已以管理员身份启动中转进程（当前操作员：" + ElevationManager.CurrentUserName()
+                            + "；若在 UAC 中输入了其他管理员账号，子进程以该账号身份运行）。");
+                    }
                 }
                 catch (Win32Exception ex)
                 {
                     elevationRequired = ex.NativeErrorCode == 740;
-                    startupError = $"启动失败：{DescribeWin32ErrorLocal(ex.NativeErrorCode)}（Windows 错误码 {ex.NativeErrorCode}）";
+                    if (launchMode.Value == RunnerLaunchMode.StandardUser)
+                    {
+                        // 设计 §6.4：降权失败必须明确写出“请改用标准权限运行 gostGUI”，
+                        // 并且绝不回落到继承管理员权限再启动。
+                        startupError = "无法以标准权限启动：请改用标准权限运行 gostGUI（"
+                                       + ElevationManager.DescribeWin32Error(ex.NativeErrorCode)
+                                       + "，Windows 错误码 " + ex.NativeErrorCode + "）";
+                    }
+                    else if (ex.NativeErrorCode == 1223)
+                    {
+                        // UAC 取消就是单独一行“已取消管理员授权”，不加任何前后缀（设计 §6.4）。
+                        startupError = ElevationManager.DescribeWin32Error(1223);
+                    }
+                    else
+                    {
+                        startupError = $"启动失败：{ElevationManager.DescribeWin32Error(ex.NativeErrorCode)}（Windows 错误码 {ex.NativeErrorCode}）";
+                    }
                 }
                 catch (Exception ex)
                 {
+                    // 中转进程启动/握手失败（含降权路径上非 Win32 的失败）都在这里落成 System 日志。
                     startupError = "启动失败：" + ex.Message;
                 }
             }
@@ -213,7 +281,7 @@ namespace gostGUI
                 catch (Win32Exception ex)
                 {
                     elevationRequired = ex.NativeErrorCode == 740;
-                    startupError = $"启动失败：{DescribeWin32ErrorLocal(ex.NativeErrorCode)}（Windows 错误码 {ex.NativeErrorCode}）";
+                    startupError = $"启动失败：{ElevationManager.DescribeWin32Error(ex.NativeErrorCode)}（Windows 错误码 {ex.NativeErrorCode}）";
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -435,6 +503,22 @@ namespace gostGUI
             _jobManager?.Dispose();
         }
 
+        /// <summary>
+        /// 权限矩阵选路（纯函数）：返回 null 表示在 UI 进程内直连启动；否则返回中转进程的启动模式。
+        /// 标准进程的管理员项必须走 UAC 提权中转；管理员进程的普通项必须走降权中转，绝不回落到继承当前权限。
+        /// </summary>
+        internal static RunnerLaunchMode? DecideMode(bool launcherElevated, bool runAsAdmin)
+        {
+            if (runAsAdmin)
+            {
+                // 已经提权：直连即可；未提权：必须让 runner 穿过 UAC 拿管理员令牌。
+                return launcherElevated ? (RunnerLaunchMode?)null : RunnerLaunchMode.Elevated;
+            }
+
+            // 普通项在管理员进程里必须降权（任务 10 的 explorer 令牌路径）；标准进程里本来就同权限，直连。
+            return launcherElevated ? RunnerLaunchMode.StandardUser : (RunnerLaunchMode?)null;
+        }
+
         /// <summary>调试开关：只有精确等于 "1" 才强制走 runner；未设置或其它值保持直连行为。</summary>
         private static bool IsForceRunnerEnabled()
         {
@@ -479,6 +563,19 @@ namespace gostGUI
         private void LogSystem(ConfigItem item, string message)
         {
             OutputReceived?.Invoke(item, LogKind.System, message + Environment.NewLine);
+        }
+
+        /// <summary>信息性 System 日志：订阅者的异常不能反过来影响本次启动的结论。</summary>
+        private void TryLogSystem(ConfigItem item, string message)
+        {
+            try
+            {
+                LogSystem(item, message);
+            }
+            catch (Exception)
+            {
+                // 日志回调故障只丢这一行提示，启动流程照常继续。
+            }
         }
 
         private static ProcessStartInfo CreateStartInfo(LaunchRequest request)
@@ -528,31 +625,6 @@ namespace gostGUI
 
                 sequence.NotifyExit(exitCode, code => ProcessExited?.Invoke(configItem, code));
             };
-        }
-
-        /// <summary>
-        /// Win32 错误码 → 中文说明。Task 6 的本地占位；Task 9 会换成 ElevationManager.DescribeWin32Error 并删除本方法。
-        /// </summary>
-        private static string DescribeWin32ErrorLocal(int code)
-        {
-            switch (code)
-            {
-                case 740:
-                    return "需要管理员权限（请勾选“以管理员身份运行”）";
-                case 1223:
-                    return "已取消管理员授权";
-                case 1314:
-                    return "权限不足";
-                case 2:
-                    return "文件不存在";
-                case 5:
-                    return "拒绝访问";
-                case 193:
-                    return "不是有效的可执行文件";
-                default:
-                    // 调用方会拼上“启动失败：”，这里不能再重复“启动进程失败”。
-                    return "未知错误";
-            }
         }
 
         private static int GetExitCodeSafe(Process process)

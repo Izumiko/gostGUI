@@ -88,6 +88,7 @@
     <Compile Include="LogViewManager.cs" />
     <Compile Include="ConfigurationManager.cs" />
     <Compile Include="ProcessManager.cs" />
+    <Compile Include="ElevationManager.cs" />
     <Compile Include="RunnerClient.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
