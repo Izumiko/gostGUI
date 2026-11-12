@@ -189,6 +189,9 @@ namespace gostGUI
             Check("Form_DpiChange_RescalesLayout", FormDpiChangeRescalesLayout);
             Check("Form_ExitSaveFailure_IsReported", FormExitSaveFailureIsReported);
 
+            // Task 14 / R36：启动自动恢复只拉起 enable && !runAsAdmin 的项；管理员项跳过并只记一行日志。
+            Check("Startup_SkipsAdminItems", StartupSkipsAdminItems);
+
             // 主题化批量日志（Task 12b）：三类着色 + 1000 行上限 + 用户上翻时不抢滚动条。
             Check("Log_BatchesAndColors", LogBatchesAndColors);
             Check("Log_DoesNotAutoScrollWhenUserScrolledUp", LogDoesNotAutoScrollWhenUserScrolledUp);
@@ -3391,11 +3394,9 @@ namespace gostGUI
         private static void RunnerRelaysStdoutStderrAndExitCode()
         {
             string runnerPath = Path.Combine(Common.GetApplicationPath(), "gostGUI.Runner.exe");
-            if (!File.Exists(runnerPath))
-            {
-                Notice("SKIP Runner_RelaysStdoutStderrAndExitCode：找不到 " + runnerPath);
-                return;
-            }
+
+            // R26/Task 14：套件从构建输出目录运行，runner 缺失就是打包回归，必须失败而不是 SKIP。
+            Assert(File.Exists(runnerPath), "找不到中转进程：" + runnerPath + "（请先构建解决方案）");
 
             string pipeName = "gostgui." + Guid.NewGuid().ToString("N");
             string nonce = Guid.NewGuid().ToString("N");
@@ -5520,6 +5521,30 @@ namespace gostGUI
         }
 
         /// <summary>
+        /// R36：启动时的自动恢复/开机自启只拉起 <c>enable && !runAsAdmin</c> 的项。
+        /// 纯函数断言（不启动任何进程），同时逐字钉住跳过那一行的文案。
+        /// </summary>
+        private static void StartupSkipsAdminItems()
+        {
+            Assert(!FormMain.ShouldAutoRestore(null), "null 项不应参与自动恢复。");
+
+            Assert(
+                FormMain.ShouldAutoRestore(new ConfigItem { Enable = true, RunAsAdmin = false }),
+                "启用且非管理员的项应参与自动恢复。");
+            Assert(
+                !FormMain.ShouldAutoRestore(new ConfigItem { Enable = true, RunAsAdmin = true }),
+                "管理员项不应参与自动恢复（R36：留给显式“启动/全部启动”）。");
+            Assert(
+                !FormMain.ShouldAutoRestore(new ConfigItem { Enable = false, RunAsAdmin = false }),
+                "未启用的项不应参与自动恢复。");
+            Assert(
+                !FormMain.ShouldAutoRestore(new ConfigItem { Enable = false, RunAsAdmin = true }),
+                "未启用的管理员项不应参与自动恢复。");
+
+            AssertEqual("已跳过：需要管理员权限，请手动启动", FormMain.AutoRestoreSkipMessage);
+        }
+
+        /// <summary>
         /// 递归断言：可见子控件的矩形不越出父控件客户区。AutoScroll 面板的内容区允许比视口大，
         /// 不再向下递归（否则把“可滚动”误判成“被裁切”）。
         /// </summary>
@@ -5892,8 +5917,9 @@ namespace gostGUI
 
         /// <summary>
         /// R42 + Task 13：在独立 STA 线程上跑与 --ui-snapshot 相同的例程，断言 96 DPI 的
-        /// 1024×640、144 DPI 的 1536×960、192 DPI 的 2048×1280 三对 PNG 都是非空真 PNG，
-        /// 且每对浅色/深色不同、不同 DPI 之间也不同（说明缩放真的生效）。
+        /// 1024×640、144 DPI 的 1536×960 两对 PNG 都是非空真 PNG；R49 起，192 DPI 的
+        /// 2048×1280 对只在宿主真的是 192 DPI 时才要求产出（否则断言它被跳过并记 Notice）。
+        /// 每对浅色/深色不同，不同 DPI 之间也不同（说明缩放真的生效）。
         /// 只有“窗体根本创建不出来”时才 SKIP 并记 Notice（其余失败一律判 FAIL）。
         /// </summary>
         private static void FormSnapshotRendersBothThemes()
@@ -5954,8 +5980,6 @@ namespace gostGUI
                 AssertPng(darkPath, 1024, 640);
                 AssertPng(light150Path, 1536, 960);
                 AssertPng(dark150Path, 1536, 960);
-                AssertPng(light200Path, 2048, 1280);
-                AssertPng(dark200Path, 2048, 1280);
 
                 Assert(
                     !BytesEqual(File.ReadAllBytes(lightPath), File.ReadAllBytes(darkPath)),
@@ -5964,14 +5988,31 @@ namespace gostGUI
                     !BytesEqual(File.ReadAllBytes(light150Path), File.ReadAllBytes(dark150Path)),
                     "144 DPI 浅色与深色快照不应逐字节相同（说明主题切换没生效）。");
                 Assert(
-                    !BytesEqual(File.ReadAllBytes(light200Path), File.ReadAllBytes(dark200Path)),
-                    "192 DPI 浅色与深色快照不应逐字节相同（说明主题切换没生效）。");
-                Assert(
                     !BytesEqual(File.ReadAllBytes(lightPath), File.ReadAllBytes(light150Path)),
                     "144 DPI 快照不应与 96 DPI 相同（说明 DPI 缩放没生效）。");
-                Assert(
-                    !BytesEqual(File.ReadAllBytes(lightPath), File.ReadAllBytes(light200Path)),
-                    "192 DPI 快照不应与 96 DPI 相同（说明 DPI 缩放没生效）。");
+
+                // R49：192 DPI 对只在宿主真的是 192 DPI 时产出；否则必须确认它被跳过。
+                int hostDpi = FormMain.HostSystemDpi();
+                if (hostDpi == 192)
+                {
+                    AssertPng(light200Path, 2048, 1280);
+                    AssertPng(dark200Path, 2048, 1280);
+
+                    Assert(
+                        !BytesEqual(File.ReadAllBytes(light200Path), File.ReadAllBytes(dark200Path)),
+                        "192 DPI 浅色与深色快照不应逐字节相同（说明主题切换没生效）。");
+                    Assert(
+                        !BytesEqual(File.ReadAllBytes(lightPath), File.ReadAllBytes(light200Path)),
+                        "192 DPI 快照不应与 96 DPI 相同（说明 DPI 缩放没生效）。");
+                }
+                else
+                {
+                    Assert(
+                        !File.Exists(light200Path) && !File.Exists(dark200Path),
+                        "宿主不是 192 DPI（实际 " + hostDpi + "）时不应产出 200% 快照对。");
+                    Notice("SKIP Form_SnapshotRendersBothThemes 的 192 DPI 快照对：宿主系统 DPI=" +
+                        hostDpi + "（不是 192）。");
+                }
             }
             finally
             {

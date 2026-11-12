@@ -34,6 +34,12 @@ namespace gostGUI
         private const int SnapshotWidth = 1024;
         private const int SnapshotHeight = 640;
 
+        /// <summary>
+        /// R36：启动时的自动恢复/开机自启跳过管理员项时，写进该项日志的唯一一行。
+        /// 必须是精确文案，不得添加任何前缀（验收会逐字断言）。
+        /// </summary>
+        internal const string AutoRestoreSkipMessage = "已跳过：需要管理员权限，请手动启动";
+
         private ProcessManager _processManager;
         private ConfigurationManager _configManager;
         private LogViewManager _logViewManager;
@@ -984,6 +990,16 @@ namespace gostGUI
             });
         }
 
+        /// <summary>
+        /// R36（纯决策，自检直接断言）：启动时的自动恢复与开机自启只拉起
+        /// <c>enable && !runAsAdmin</c> 的项。管理员项必须由用户显式点“启动”或“全部启动”
+        /// 才走提权路径（每项一次 UAC），否则启动就会变成一串无法拒绝的弹窗。
+        /// </summary>
+        internal static bool ShouldAutoRestore(ConfigItem item)
+        {
+            return item != null && item.Enable && !item.RunAsAdmin;
+        }
+
         /// <summary>与 v1.8 的 startAll(true/false) 等价：写 Enable 标志，然后启动需要运行的项。</summary>
         private void StartAll(bool startAllItems)
         {
@@ -996,7 +1012,20 @@ namespace gostGUI
                     _configManager.UpdateItem(item);
                 }
 
-                if (item.Enable && !IsItemRunning(item))
+                if (!item.Enable)
+                {
+                    continue;
+                }
+
+                if (!startAllItems && !ShouldAutoRestore(item))
+                {
+                    // R36：自动恢复/开机自启只记一行日志，不弹 UAC、不启动、也不清 Enable
+                    //（用户下次点“全部启动”时它仍是启用状态）。
+                    AppendSystemLine(item, AutoRestoreSkipMessage);
+                    continue;
+                }
+
+                if (!IsItemRunning(item))
                 {
                     toStart.Add(item);
                 }
@@ -3532,6 +3561,15 @@ namespace gostGUI
                 return StartupDpiOverride;
             }
 
+            return HostSystemDpi();
+        }
+
+        /// <summary>
+        /// 宿主真实系统 DPI（不受 <see cref="StartupDpiOverride"/> 影响）。
+        /// R49：只有宿主真的是 192 DPI 时，才允许产出“真实 200% 上下文”的那对快照。
+        /// </summary>
+        internal static int HostSystemDpi()
+        {
             try
             {
                 uint dpi = GetDpiForSystem();
@@ -3566,8 +3604,13 @@ namespace gostGUI
                     Console.WriteLine("PASS ui-snapshot：" + Path.Combine(full, "form-dark.png"));
                     Console.WriteLine("PASS ui-snapshot：" + Path.Combine(full, "form-150-light.png"));
                     Console.WriteLine("PASS ui-snapshot：" + Path.Combine(full, "form-150-dark.png"));
-                    Console.WriteLine("PASS ui-snapshot：" + Path.Combine(full, "form-200-light.png"));
-                    Console.WriteLine("PASS ui-snapshot：" + Path.Combine(full, "form-200-dark.png"));
+
+                    // R49：宿主不是 192 DPI 时不会产出这一对（TryRenderSnapshots 已给出 NOTICE）。
+                    if (HostSystemDpi() == 192)
+                    {
+                        Console.WriteLine("PASS ui-snapshot：" + Path.Combine(full, "form-200-light.png"));
+                        Console.WriteLine("PASS ui-snapshot：" + Path.Combine(full, "form-200-dark.png"));
+                    }
                 }
                 else
                 {
@@ -3583,10 +3626,11 @@ namespace gostGUI
         }
 
         /// <summary>
-        /// 渲染 96 DPI（设计基线）、144 DPI（150%）与 192 DPI（200%，开发机真实缩放）
-        /// 各一对浅/深 PNG。绝不 Show()/Visible=true：只 CreateControl + DrawToBitmap。
+        /// 渲染 96 DPI（设计基线）、144 DPI（150% 模拟）各一对浅/深 PNG；
+        /// 宿主真的是 192 DPI（200%）时再渲染一对真实 192 DPI 上下文快照（R49）。
+        /// 绝不 Show()/Visible=true：只 CreateControl + DrawToBitmap。
         /// 96/144 在“DPI 不感知”的 96 DPI 绘制上下文里用布局/自绘/字体比例模拟；
-        /// 192 用真实 DPI 上下文（开发机 200%），文本度量按目标 DPI 显式钉住。
+        /// 192 用真实 DPI 上下文，文本度量按目标 DPI 显式钉住。
         /// </summary>
         internal static bool TryRenderSnapshots(string directory, out string error)
         {
@@ -3621,10 +3665,19 @@ namespace gostGUI
                 }
 
                 // 开发机的真实缩放是 200%：用真实的 192 DPI 上下文（不模拟）输出一对，
-                // 验收真实出货比例。
-                if (!TryRenderSnapshotPair(fullDirectory, 192, "form-200-light.png", "form-200-dark.png", true, out error))
+                // 验收真实出货比例。R49：宿主不是 192 DPI 时这对没有意义（真实上下文就是
+                // 宿主 DPI），必须跳过并明确通知，而不是悄悄产出一张“假的 200%”。
+                if (HostSystemDpi() == 192)
                 {
-                    return false;
+                    if (!TryRenderSnapshotPair(fullDirectory, 192, "form-200-light.png", "form-200-dark.png", true, out error))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    WriteSnapshotNotice(
+                        "宿主系统 DPI 为 " + HostSystemDpi() + "（不是 192），已跳过 200% 真实 DPI 快照对。");
                 }
 
                 return true;
@@ -3651,9 +3704,12 @@ namespace gostGUI
 
             // nativeDpi=true 用真实 DPI 上下文（开发机 192 DPI）；否则在 96 DPI 绘制上下文里
             // 用布局/自绘/字体比例模拟目标 DPI。
-            // 文本度量必须钉在目标 DPI：同一进程先渲染的 96 DPI 会污染 TextRenderer 的测定缓存。
+            // R48：文本度量必须跟随“绘制上下文”，而不是被模拟的 DPI。模拟对在 96 DPI 上下文里
+            // 渲染（字体已按 1.5× 放大），按 144 度量会把文字宽度算大 1.5 倍，布局随之失真；
+            // 只有真实 192 DPI 上下文才按目标 DPI 度量（同时避免 96 DPI 的测定缓存污染）。
+            int measureDpi = nativeDpi ? dpi : ThemePaint.BaselineDpi;
             int previousMeasureDpi = ThemeText.MeasureDpiOverride;
-            ThemeText.MeasureDpiOverride = dpi;
+            ThemeText.MeasureDpiOverride = measureDpi;
             try
             {
                 using (nativeDpi ? new SnapshotDpiScope(0) : new SnapshotDpiScope(dpi))
@@ -3833,6 +3889,24 @@ namespace gostGUI
             foreach (Control child in control.Controls)
             {
                 ForceHandles(child);
+            }
+        }
+
+        /// <summary>快照流程里的“跳过/降级”通知：控制台可用就打印，--ui-snapshot 的退出码仍是权威。</summary>
+        private static void WriteSnapshotNotice(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+            {
+                return;
+            }
+
+            try
+            {
+                Console.WriteLine("NOTICE ui-snapshot：" + message);
+            }
+            catch (Exception)
+            {
+                // WinExe 没有控制台时忽略。
             }
         }
 

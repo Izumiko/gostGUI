@@ -146,13 +146,22 @@
       <Private>false</Private>
     </ProjectReference>
   </ItemGroup>
-  <!-- R23：把中转进程复制到 UI 输出目录，发布形态保持“两个 exe + config.json”。
-       路径相对本工程解析，直接构建 gostGUI.csproj 时也不会依赖 $(SolutionDir)。 -->
+  <!-- R24/R25/R26: copy the relay exe AND its exe.config into the UI output. The
+       ProjectReference guarantees the runner is built first, so a missing runner output is a
+       packaging regression: fail the build instead of silently skipping with Condition="Exists". -->
   <Target Name="CopyRunnerToOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <_RunnerOutputDir>$(MSBuildProjectDirectory)\..\gostGUI.Runner\bin\$(Configuration)\</_RunnerOutputDir>
+      <_RunnerExePath>$(_RunnerOutputDir)gostGUI.Runner.exe</_RunnerExePath>
+      <_RunnerConfigPath>$(_RunnerOutputDir)gostGUI.Runner.exe.config</_RunnerConfigPath>
+    </PropertyGroup>
     <ItemGroup>
-      <_RunnerExe Include="$(MSBuildProjectDirectory)\..\gostGUI.Runner\bin\$(Configuration)\gostGUI.Runner.exe" />
+      <_RunnerArtifact Include="$(_RunnerExePath)" />
+      <_RunnerArtifact Include="$(_RunnerConfigPath)" />
     </ItemGroup>
-    <Copy SourceFiles="@(_RunnerExe)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('@(_RunnerExe)')" />
+    <Error Condition="!Exists('$(_RunnerExePath)')" Text="打包失败：找不到中转进程 $(_RunnerExePath)。ProjectReference 必须先构建 gostGUI.Runner。" />
+    <Error Condition="!Exists('$(_RunnerConfigPath)')" Text="打包失败：找不到中转进程配置 $(_RunnerConfigPath)。gostGUI.Runner 的 app.config 必须随 exe 一起产出。" />
+    <Copy SourceFiles="@(_RunnerArtifact)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
