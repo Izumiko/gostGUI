@@ -1,26 +1,13 @@
 // =====================================================================================
 // SelfTest.Process.cs —— 直连启动用例：ProcessManager 的事件、退出码、环境、工作目录与子进程 PID。
-// 本文件是 SelfTest 的 partial：成员由 SelfTest.cs 原样搬来（用例名/断言/注册顺序未改）。
+// 本文件是自检套件的 partial：原单体 SelfTest.cs 已按领域拆分（该文件已不存在），用例名/断言/注册顺序未改。
 // =====================================================================================
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Diagnostics;
-using System.Drawing;
 using System.IO;
-using System.IO.Pipes;
-using System.Reflection;
-using System.Runtime.InteropServices;
-using System.Security.AccessControl;
-using System.Security.Principal;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
-using gostGUI.Native;
-using gostGUI.Shared;
-using Microsoft.Win32.SafeHandles;
 
 namespace gostGUI
 {
@@ -354,6 +341,34 @@ namespace gostGUI
 
                 Assert(!manager.IsProcessRunning(item), "停止后不应仍在运行");
                 AssertEqual(0, manager.GetChildPid(item));
+            }
+        }
+
+        /// <summary>
+        /// Task 7：异步停止路径必须真的完成。直连子进程用 StopProcessAsync 停止后，
+        /// 返回的任务要在有界时间内完成，且管理器状态立刻回到“未运行”。
+        /// </summary>
+        private static void ProcessStopAsyncCompletes()
+        {
+            using (ProcessManager manager = new ProcessManager())
+            {
+                ConfigItem item = NewDirectItem("/d /s /c \"ping -n 30 127.0.0.1 >nul\"");
+                Assert(manager.StartProcess(item), "cmd 子进程应启动成功");
+                try
+                {
+                    Assert(WaitUntil(() => manager.IsProcessRunning(item), DirectWaitTimeoutMs),
+                        "启动后应处于运行中");
+
+                    Task stopTask = manager.StopProcessAsync(item, TimeSpan.FromSeconds(10));
+
+                    Assert(stopTask.Wait(DirectWaitTimeoutMs), "StopProcessAsync 应在有界时间内完成");
+                    Assert(!manager.IsProcessRunning(item), "停止任务完成后不应仍在运行");
+                    AssertEqual(0, manager.GetChildPid(item));
+                }
+                finally
+                {
+                    manager.StopProcess(item);
+                }
             }
         }
 

@@ -70,7 +70,6 @@ namespace gostGUI
         private readonly Process _runner;
         private readonly StreamReader _reader;
         private readonly TaskCompletionSource<int> _exitSource = new TaskCompletionSource<int>();
-        private readonly Thread _readerThread;
         private readonly int _childPid;
         private readonly string _runnerIdentity;
         private readonly string _baseEnvironmentSource;
@@ -109,11 +108,6 @@ namespace gostGUI
             _baseEnvironmentSource = DescribeBaseEnvironment(mode);
             // 尽力读取 runner 的真实身份：UAC 可能把它换成了另一个管理员账号，日志必须写实际值而不是 UI 令牌。
             _runnerIdentity = ReadProcessUserName(runner) ?? UnknownRunnerIdentity;
-            _readerThread = new Thread(ReadLoop)
-            {
-                IsBackground = true,
-                Name = "gostgui-runner-client"
-            };
         }
 
         /// <summary>runner 上报的子进程 PID；握手阶段拿不到正数 PID 时 StartAsync 会直接失败。</summary>
@@ -894,7 +888,10 @@ namespace gostGUI
         {
             task.ContinueWith(t =>
             {
-                _ = t.Exception;
+                // 先取 Exception（标记为已观察），再记一条调试输出：泵任务没有 await 点，
+                // 逃逸的故障只能靠这里留痕，否则会被线程池静默丢弃。
+                AggregateException error = t.Exception;
+                Debug.WriteLine("后台任务异常：" + error);
             }, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
         }
 
@@ -989,7 +986,19 @@ namespace gostGUI
 
         private void StartReader()
         {
-            _readerThread.Start();
+            // ReadLoop 会在整个会话存续期内阻塞在管道读上，所以必须用 LongRunning 让
+            // TaskScheduler.Default 为它创建一条专用线程：普通线程池任务会长期占住一个工作线程，
+            // 并发会话一多就可能把线程池饿死。LongRunning 创建的线程是后台线程（与原来的
+            // IsBackground = true 等价），不阻止进程退出；会话关闭管道后 ReadLoop 自行返回，
+            // 这条泵线程随会话一起结束。
+            // 泵任务没有 await 点：万一有异常逃出 ReadLoop 的 try/finally，必须由 ObserveFailure
+            // 观测并记录，不能让它在 GC 时以未观察异常的形式静默消失。
+            Task pump = Task.Factory.StartNew(
+                ReadLoop,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            ObserveFailure(pump);
         }
 
         /// <summary>

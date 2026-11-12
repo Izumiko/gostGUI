@@ -1,26 +1,14 @@
 // =====================================================================================
 // SelfTest.Form.cs —— 主窗口用例：骨架、详情编辑器、日志面板、启动恢复与快照渲染。
-// 本文件是 SelfTest 的 partial：成员由 SelfTest.cs 原样搬来（用例名/断言/注册顺序未改）。
+// 本文件是自检套件的 partial：原单体 SelfTest.cs 已按领域拆分（该文件已不存在），用例名/断言/注册顺序未改。
 // =====================================================================================
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Diagnostics;
 using System.Drawing;
 using System.IO;
-using System.IO.Pipes;
-using System.Reflection;
-using System.Runtime.InteropServices;
-using System.Security.AccessControl;
-using System.Security.Principal;
-using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
-using gostGUI.Native;
-using gostGUI.Shared;
-using Microsoft.Win32.SafeHandles;
 
 namespace gostGUI
 {
@@ -636,6 +624,75 @@ namespace gostGUI
                             Assert(
                                 form.BannerVisibleForTest,
                                 "隐藏到托盘时保存失败应显示横幅（应用仍在运行）。");
+                        }
+                    }
+                    finally
+                    {
+                        FormMain.StartupDpiOverride = previousDpi;
+                        ThemePaint.DpiOverride = previousPaint;
+                    }
+                });
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// R2-13：退出前提交升起的横幅（从托盘退出时窗口已隐藏，没人看得见）必须转成退出保存的
+        /// 可见失败原因；没有横幅时退出保存仍然静默成功。
+        /// </summary>
+        private static void FormExitCommitBannerBecomesExitFailure()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                Assert(Common.SaveTo(new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "退出横幅", Program = "cmd.exe", Args = string.Empty }
+                    }
+                }, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                RunOnDedicatedSta(() =>
+                {
+                    int previousDpi = FormMain.StartupDpiOverride;
+                    int previousPaint = ThemePaint.DpiOverride;
+                    FormMain.StartupDpiOverride = 96;
+                    ThemePaint.DpiOverride = 96;
+                    try
+                    {
+                        using (var form = new FormMain(true, manager))
+                        {
+                            form.SuppressDialogsForTest = true;
+                            form.SetWindowGeometryForTest(new Size(1000, 600), new Point(10, 20));
+
+                            // ① 成功路径保持静默：没有横幅，窗口状态保存成功。
+                            form.SaveExitWindowStateForTest();
+                            AssertEqual("", form.LastWindowSaveFailureForTest);
+                            Assert(!form.BannerVisibleForTest, "成功路径不应留下横幅。");
+                        }
+
+                        using (var form = new FormMain(true, manager))
+                        {
+                            form.SuppressDialogsForTest = true;
+                            form.SetWindowGeometryForTest(new Size(1000, 600), new Point(10, 20));
+
+                            // ② 提交本身能落盘，但合并后的环境块超过 32K，会升起“环境变量无效”横幅。
+                            // 从托盘退出时窗口已隐藏，这个横幅看不见，必须转成退出保存的失败原因。
+                            form.SetEnvTextForTest("BIG=" + new string('y', 40 * 1024));
+                            form.SaveExitWindowStateForTest();
+
+                            Assert(
+                                form.LastWindowSaveFailureForTest.Contains("环境变量无效"),
+                                "退出前提交升起的横幅必须转成退出保存失败原因：" + form.LastWindowSaveFailureForTest);
+                            Assert(
+                                !form.BannerVisibleForTest,
+                                "退出路径不应把横幅留在不可见的窗口上。");
                         }
                     }
                     finally

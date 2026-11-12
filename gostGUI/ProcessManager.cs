@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using gostGUI.Shared;
 
 namespace gostGUI
@@ -419,9 +420,32 @@ namespace gostGUI
             return true;
         }
 
+        /// <summary>
+        /// 同步停止入口（行为不变）：现有调用点（FormMain 的 Task.Run 回调、<see cref="Dispose"/>）继续使用它。
+        /// 真正的工作由 <see cref="StopProcessAsync"/> 完成；这里的阻塞只等待从不向 UI 线程投递续体的任务，
+        /// 因此即使调用线程是 UI 线程也不会死锁。
+        /// </summary>
         public void StopProcess(ConfigItem configItem)
         {
+            // 保持既有 8 秒上限：旧实现只对中转会话使用 RunnerStopTimeout；直连子进程现在的
+            // kill 后等待同样受这个上限约束（Kill 成功时进程会立刻退出，实际等待只有毫秒级）。
+            StopProcessAsync(configItem, RunnerStopTimeout).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// 异步停止一个配置项：中转会话走 <see cref="RunnerSession.StopAsync(TimeSpan)"/>，直连子进程
+        /// kill 后等待退出（最多 <paramref name="timeout"/>）。登记项的移出仍在锁内同步完成，
+        /// 与 <see cref="IsProcessRunning"/> / 启动路径的“先查后改”保持互斥；公开事件一律在锁外触发。
+        /// <para>
+        /// 死锁说明：本方法（以及 <see cref="StopAllProcessesAsync"/>、<see cref="RunnerSession.StopAsync"/>）
+        /// 的每个 await 都带 ConfigureAwait(false)，且没有任何续体需要 UI 线程；同步包装用
+        /// GetAwaiter().GetResult() 阻塞的调用线程不会被等待中的续体回投，因此不会 sync-over-async 死锁。
+        /// </para>
+        /// </summary>
+        public async Task StopProcessAsync(ConfigItem configItem, TimeSpan timeout)
+        {
             if (configItem == null) return;
+
             Process p = null;
             RunnerSession session = null;
             lock (_lock)
@@ -442,7 +466,7 @@ namespace gostGUI
                 // R27：先礼后兵——发 stop 等 exit，超时后 RunnerSession 会杀 runner，由 runner 的 Job 带走子进程树。
                 try
                 {
-                    session.StopAsync(RunnerStopTimeout).GetAwaiter().GetResult();
+                    await session.StopAsync(timeout).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -463,30 +487,71 @@ namespace gostGUI
 
             if (p != null)
             {
-                try
-                {
-                    if (!p.HasExited)
-                    {
-                        p.Kill();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogSystem(configItem, "停止进程失败：" + ex.Message);
-                }
-                finally
-                {
-                    try
-                    {
-                        p.Dispose();
-                    }
-                    catch { }
-                    ProcessStopped?.Invoke(configItem);
-                }
+                await StopDirectProcessAsync(configItem, p, timeout).ConfigureAwait(false);
             }
         }
 
+        /// <summary>
+        /// 直连子进程的异步停止：kill 后等待退出，最多 <paramref name="timeout"/>。
+        /// <para>
+        /// 事件顺序保持不变：旧实现是 Kill 后立即 Dispose，本次构建上 20 次采样中进程退出回调均抢不过
+        /// Dispose，订阅者没有观测到 ProcessExited（直连停止只报 ProcessStopped；这是实测结果，不是普遍保证，
+        /// 回调时序仍取决于运行时）。这里在 kill 前显式关闭退出事件的观察者，再等待退出，因此不会多出一条
+        /// “进程已退出”的 UI 日志；kill 或等待失败的路径仍与旧实现一样只记一条日志并立刻收尾，不会白等 timeout。
+        /// </para>
+        /// </summary>
+        private async Task StopDirectProcessAsync(ConfigItem configItem, Process process, TimeSpan timeout)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    // 保留“主动停止不报 ProcessExited”的既有语义（见方法注释）。
+                    process.EnableRaisingEvents = false;
+                    process.Kill();
+                }
+
+                // WaitForExit 也可能抛（句柄失效/等待被中断）：与 Kill 同理，记一条日志后继续 teardown。
+                await Task.Run(() => process.WaitForExit(TimeoutMilliseconds(timeout)))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogSystem(configItem, "停止进程失败：" + ex.Message);
+            }
+            finally
+            {
+                try
+                {
+                    process.Dispose();
+                }
+                catch { }
+                ProcessStopped?.Invoke(configItem);
+            }
+        }
+
+        /// <summary>把 TimeSpan 收敛成 WaitForExit 可接受的上限；非正值表示不等待（与 RunnerSession.StopAsync 一致）。</summary>
+        private static int TimeoutMilliseconds(TimeSpan timeout)
+        {
+            if (timeout <= TimeSpan.Zero)
+            {
+                return 0;
+            }
+
+            return timeout.TotalMilliseconds >= int.MaxValue ? int.MaxValue : (int)timeout.TotalMilliseconds;
+        }
+
+        /// <summary>同步停止入口（行为不变）：逐项调用 <see cref="StopProcessAsync"/>。</summary>
         public void StopAllProcesses()
+        {
+            StopAllProcessesAsync(RunnerStopTimeout).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// 依次停止当前登记的全部项（顺序与旧实现一致）。每一项获得完整 timeout，与旧实现
+        /// “每个 StopProcess 各自等 8 秒”的语义相同；任何 await 都不回投 UI 线程。
+        /// </summary>
+        public async Task StopAllProcessesAsync(TimeSpan timeout)
         {
             List<ConfigItem> runningItems;
             lock (_lock)
@@ -499,7 +564,7 @@ namespace gostGUI
 
             foreach (ConfigItem item in runningItems)
             {
-                StopProcess(item);
+                await StopProcessAsync(item, timeout).ConfigureAwait(false);
             }
         }
 

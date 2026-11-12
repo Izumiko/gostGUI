@@ -505,14 +505,26 @@ namespace gostGUI
 
         private void ShowBanner(string message, bool isError)
         {
-            if (_bannerPanel == null || _bannerLabel == null)
-            {
-                return;
-            }
-
             if (string.IsNullOrEmpty(message))
             {
                 HideBanner();
+                return;
+            }
+
+            if (_captureExitCommitBanner)
+            {
+                // R2-13：退出前提交时窗口可能已隐藏，横幅会随退出一起被销毁；只记原因，
+                // 由退出保存失败（R45 模态框）统一显形。保留第一条，避免后一条覆盖真正的失败原因。
+                if (string.IsNullOrEmpty(_exitCommitBannerReason))
+                {
+                    _exitCommitBannerReason = message;
+                }
+
+                return;
+            }
+
+            if (_bannerPanel == null || _bannerLabel == null)
+            {
                 return;
             }
 

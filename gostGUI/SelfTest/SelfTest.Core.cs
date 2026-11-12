@@ -1,25 +1,13 @@
 // =====================================================================================
 // SelfTest.Core.cs —— 自检骨架：用例注册表、Check/Assert、日志与 SKIP 管道、共享临时目录夹具、入口（RunAll / RunRunnerSmoke）。
-// 本文件是 SelfTest 的 partial：成员由 SelfTest.cs 原样搬来（用例名/断言/注册顺序未改）。
+// 本文件是自检套件的 partial：原单体 SelfTest.cs 已按领域拆分（该文件已不存在），用例名/断言/注册顺序未改。
 // =====================================================================================
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Diagnostics;
-using System.Drawing;
 using System.IO;
-using System.IO.Pipes;
-using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Security.AccessControl;
-using System.Security.Principal;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using gostGUI.Native;
-using gostGUI.Shared;
 using Microsoft.Win32.SafeHandles;
 
 namespace gostGUI
@@ -117,6 +105,7 @@ namespace gostGUI
             Check("Direct_MissingProgram_SetsErrorAndDoesNotStart", DirectMissingProgramSetsErrorAndDoesNotStart);
             Check("Direct_NonexistentFile_ReturnsFalseWithoutThrowing", DirectNonexistentFileReturnsFalseWithoutThrowing);
             Check("Direct_GetChildPid_IsLiveThenZero", DirectGetChildPidIsLiveThenZero);
+            Check("Process_StopAsyncCompletes", ProcessStopAsyncCompletes);
             Check("Direct_ElevationRequired_IsDetected", DirectElevationRequiredIsDetected);
 
             // 边界用例放在 Direct 之后：accept 分支会触发一次性的父环境规范化，
@@ -205,6 +194,7 @@ namespace gostGUI
             Check("Form_LayoutAt120And144Dpi_IsNotClipped", FormLayoutAt120And144DpiIsNotClipped);
             Check("Form_DpiChange_RescalesLayout", FormDpiChangeRescalesLayout);
             Check("Form_ExitSaveFailure_IsReported", FormExitSaveFailureIsReported);
+            Check("Form_ExitCommitBanner_BecomesExitFailure", FormExitCommitBannerBecomesExitFailure);
 
             // Task 14 / R36：启动自动恢复只拉起 enable && !runAsAdmin 的项；管理员项跳过并只记一行日志。
             Check("Startup_SkipsAdminItems", StartupSkipsAdminItems);

@@ -5,9 +5,10 @@ namespace gostGUI.Native
 {
     /// <summary>
     /// user32.dll 的原生入口与配套结构体。本文件是阶段二 P/Invoke 收口的纯搬运目标：
-    /// 签名、<c>CharSet</c>、<c>SetLastError</c>、<c>EntryPoint</c> 与结构体布局逐字保留。
-    /// 唯一的新增是 <c>keybd_event</c> 的替代品 <c>SendInput</c>（托盘还原路径，见
-    /// <see cref="NativeMethods.BuildAltKeyInputs"/>）。
+    /// 既有签名、<c>CharSet</c>、<c>SetLastError</c>、<c>EntryPoint</c> 与结构体布局逐字保留。
+    /// 除搬运外新增了三类内容：<c>keybd_event</c> 的替代品 <c>SendInput</c>、它需要的
+    /// <c>INPUT</c> 联合体与相关结构体/常量，以及纯构造函数
+    /// <see cref="NativeMethods.BuildAltKeyInputs"/>（托盘还原路径用它们取得前台切换权限）。
     /// </summary>
     internal static partial class NativeMethods
     {

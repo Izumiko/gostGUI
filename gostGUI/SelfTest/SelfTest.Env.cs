@@ -1,26 +1,12 @@
 // =====================================================================================
 // SelfTest.Env.cs —— 环境变量用例：EnvBlock 解析/展开/合并/32K 上限，以及子进程环境块应用的守卫。
-// 本文件是 SelfTest 的 partial：成员由 SelfTest.cs 原样搬来（用例名/断言/注册顺序未改）。
+// 本文件是自检套件的 partial：原单体 SelfTest.cs 已按领域拆分（该文件已不存在），用例名/断言/注册顺序未改。
 // =====================================================================================
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
-using System.Drawing;
-using System.IO;
-using System.IO.Pipes;
-using System.Reflection;
-using System.Runtime.InteropServices;
-using System.Security.AccessControl;
-using System.Security.Principal;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using gostGUI.Native;
 using gostGUI.Shared;
-using Microsoft.Win32.SafeHandles;
 
 namespace gostGUI
 {

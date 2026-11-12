@@ -85,20 +85,15 @@ namespace gostGUI
         /// <summary>关闭窗口 = 隐藏到托盘；真正退出只有托盘/按钮的“退出”。</summary>
         private void FormMain_FormClosing(object sender, FormClosingEventArgs e)
         {
-            // 窗口可能在最后一次失焦之前就被关闭：先把详情编辑器里待提交的字段落盘。
-            CommitPendingDetailEdits();
-
             if (_isExiting)
             {
-                // 正常退出路径已经在 ExitApplication 里保存过；这里只兜底一次。
-                if (!_exitWindowStateAttempted)
-                {
-                    _exitWindowStateAttempted = true;
-                    PersistWindowState(true);
-                }
-
+                // 正常退出路径已经在 ExitApplication 里保存过；这里只兜底一次（同样走 R2-13 的提交 + 保存序列）。
+                SaveExitWindowState();
                 return;
             }
+
+            // 窗口可能在最后一次失焦之前就被关闭：先把详情编辑器里待提交的字段落盘。
+            CommitPendingDetailEdits();
 
             if (e.CloseReason == CloseReason.UserClosing)
             {
@@ -128,6 +123,29 @@ namespace gostGUI
         }
 
         /// <summary>
+        /// 退出前的最后一次提交 + 窗口状态保存。R2-13：提交里升起的横幅（保存失败/环境变量无效）
+        /// 在已隐藏的窗口里没人看得见，必须并入 R45 的退出前模态框；窗口状态保存成功也不能把它掩盖。
+        /// </summary>
+        private void SaveExitWindowState()
+        {
+            if (_exitWindowStateAttempted)
+            {
+                return;
+            }
+
+            _exitWindowStateAttempted = true;
+
+            string commitBanner = CommitPendingDetailEditsForExit();
+            PersistWindowState(true, commitBanner);
+        }
+
+        /// <summary>自检缝：走与退出路径完全相同的“提交 + 窗口状态保存”序列（不执行 Application.Exit）。</summary>
+        internal void SaveExitWindowStateForTest()
+        {
+            SaveExitWindowState();
+        }
+
+        /// <summary>
         /// 真退出：先停掉所有进程（可能阻塞，放线程池），再关 Job、关托盘、Application.Exit。
         /// _isExiting 语义保留：退出过程中的 ProcessExited/Stopped 不再回写 Enable。
         /// </summary>
@@ -138,19 +156,12 @@ namespace gostGUI
                 return;
             }
 
-            // 托盘/按钮“退出”同样可能发生在最后一次失焦之前：在置 _isExiting 之前提交。
-            CommitPendingDetailEdits();
-
             // 先置 _exitRequested：退出前的保存可能弹出模态框，模态框会泵消息，
             // 第二次“退出”点击必须被这里挡住，不能重复停进程/Application.Exit。
             _exitRequested = true;
 
-            // 退出前把窗口状态落盘；失败必须显形，不能把刚提交的编辑静默丢掉。
-            if (!_exitWindowStateAttempted)
-            {
-                _exitWindowStateAttempted = true;
-                PersistWindowState(true);
-            }
+            // 退出前把字段与窗口状态落盘；失败必须显形，不能把刚提交的编辑静默丢掉。
+            SaveExitWindowState();
 
             _isExiting = true;
 

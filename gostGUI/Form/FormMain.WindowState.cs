@@ -358,19 +358,25 @@ namespace gostGUI
         }
 
         /// <summary>保存窗口状态；失败时记录中文原因并显形（托盘气泡或退出前模态框）。</summary>
-        private void PersistWindowState(bool exiting)
+        /// <param name="exiting">true = 真退出路径（R45 模态框）；false = 隐藏到托盘（气泡/横幅）。</param>
+        /// <param name="pendingCommitFailure">
+        /// 退出前提交里已经升起的失败原因（R2-13）。非空即视为退出保存失败，即使本次窗口状态写入成功，
+        /// 也要走 R45 模态框把它显形——否则隐藏窗口里的横幅会随退出一起消失。
+        /// </param>
+        private void PersistWindowState(bool exiting, string pendingCommitFailure = null)
         {
-            string reason = null;
+            string reason = pendingCommitFailure;
             try
             {
                 ConfigWindow state = CaptureWindowState();
+                string saveFailure = null;
                 if (state == null)
                 {
-                    reason = "无法读取当前窗口大小/位置。";
+                    saveFailure = "无法读取当前窗口大小/位置。";
                 }
                 else if (_configManager == null)
                 {
-                    reason = "配置管理器不可用。";
+                    saveFailure = "配置管理器不可用。";
                 }
                 else
                 {
@@ -385,15 +391,15 @@ namespace gostGUI
                     {
                         if (!_configManager.SaveWindowState(state))
                         {
-                            reason = _configManager.SaveError;
-                            if (string.IsNullOrEmpty(reason))
+                            saveFailure = _configManager.SaveError;
+                            if (string.IsNullOrEmpty(saveFailure))
                             {
-                                reason = Common.LastSaveError;
+                                saveFailure = Common.LastSaveError;
                             }
 
-                            if (string.IsNullOrEmpty(reason))
+                            if (string.IsNullOrEmpty(saveFailure))
                             {
-                                reason = "保存配置文件失败。";
+                                saveFailure = "保存配置文件失败。";
                             }
                         }
                     }
@@ -402,10 +408,12 @@ namespace gostGUI
                         _suppressSaveFailedBanner = previousSuppress;
                     }
                 }
+
+                reason = CombineSaveFailures(reason, saveFailure);
             }
             catch (Exception ex)
             {
-                reason = "保存窗口状态失败：" + ex.Message;
+                reason = CombineSaveFailures(reason, "保存窗口状态失败：" + ex.Message);
             }
 
             if (string.IsNullOrEmpty(reason))
@@ -416,6 +424,22 @@ namespace gostGUI
 
             _lastWindowSaveFailure = reason;
             ReportWindowStateSaveFailure(reason, exiting);
+        }
+
+        /// <summary>把“退出前提交的横幅原因”与“本次窗口状态保存失败原因”并成一条可见提示。</summary>
+        private static string CombineSaveFailures(string first, string second)
+        {
+            if (string.IsNullOrEmpty(first))
+            {
+                return second;
+            }
+
+            if (string.IsNullOrEmpty(second))
+            {
+                return first;
+            }
+
+            return first + "；" + second;
         }
 
         /// <summary>

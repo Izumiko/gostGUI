@@ -6,6 +6,7 @@ using System.IO.Pipes;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using gostGUI.Shared;
 
 namespace gostGUI.Runner
@@ -641,12 +642,30 @@ namespace gostGUI.Runner
             /// <summary>后台线程读 UI 命令：stop → 终止整树；EOF/异常（UI 消失）→ 终止整树后退出。</summary>
             private void StartCommandReader()
             {
-                var thread = new Thread(ReadCommands)
+                // 命令泵会在子进程存活期间一直阻塞在管道读上，必须用 LongRunning 拿到
+                // TaskScheduler.Default 的专用线程；丢进线程池会长期占住一个工作线程。
+                // LongRunning 线程是后台线程（等价于原来的 IsBackground = true），
+                // UI 关闭管道后 ReadCommands 返回，泵线程随 runner 一起结束。
+                // 泵任务没有 await 点：异常若逃出 ReadCommands 的 try/finally，必须被观测并记录。
+                Task pump = Task.Factory.StartNew(
+                    ReadCommands,
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
+                ObserveFailure(pump);
+            }
+
+            /// <summary>
+            /// 观测 fire-and-forget 后台任务的逃逸异常并记一条调试输出（与 RunnerClient 的同名习惯一致）。
+            /// 先取 Exception 标记为已观察，避免未观察异常在 GC 时冒出来。
+            /// </summary>
+            private static void ObserveFailure(Task task)
+            {
+                task.ContinueWith(t =>
                 {
-                    IsBackground = true,
-                    Name = "gostgui-runner-ipc"
-                };
-                thread.Start();
+                    AggregateException error = t.Exception;
+                    Debug.WriteLine("后台任务异常：" + error);
+                }, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
             }
 
             private void ReadCommands()
