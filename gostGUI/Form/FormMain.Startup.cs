@@ -1,7 +1,8 @@
 // =====================================================================================
 // FormMain.Startup.cs —— 启动与启停：构造期初始化、显示后的自动恢复、startAll/stopAll、
 // 进程事件回到 UI 的收尾、开机自启、顶部横幅与构造期字体/图标辅助。
-// 本文件是 FormMain 的 partial，成员从 FormMain.cs 原样搬来（签名/可见性/行为未改）。
+// 本文件是 FormMain 的 partial；成员最初从 FormMain.cs 原样搬来，横幅/退出前提交逻辑随后在
+// 阶段二收尾中修正（R2-13：累计提交期全部不同原因），因此不再是纯搬运。
 // =====================================================================================
 
 using System;
@@ -513,11 +514,12 @@ namespace gostGUI
 
             if (_captureExitCommitBanner)
             {
-                // R2-13：退出前提交时窗口可能已隐藏，横幅会随退出一起被销毁；只记原因，
-                // 由退出保存失败（R45 模态框）统一显形。保留第一条，避免后一条覆盖真正的失败原因。
-                if (string.IsNullOrEmpty(_exitCommitBannerReason))
+                // R2-13：退出前提交时窗口可能已隐藏，横幅会随退出一起被销毁；按出现顺序累计所有
+                // 不同原因（提交期这些原因都是错误），再由退出保存失败提示（R45 模态框/关机气泡）统一显形。
+                // 同一原因只记一次，避免重复的保存失败刷屏。
+                if (!_exitCommitBannerReasons.Contains(message))
                 {
-                    _exitCommitBannerReason = message;
+                    _exitCommitBannerReasons.Add(message);
                 }
 
                 return;

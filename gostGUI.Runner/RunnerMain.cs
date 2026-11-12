@@ -319,6 +319,69 @@ namespace gostGUI.Runner
             }
         }
 
+        /// <summary>
+        /// 等待子进程退出，但绝不调用无参 <c>WaitForExit()</c>：它等价于 <c>WaitForExit(-1)</c>，
+        /// 会在进程退出后无超时地等 <c>AsyncStreamReader.WaitUtilEOF()</c>。子进程的孙进程若继承
+        /// 重定向 stdout/stderr 写端，EOF 要等整棵树结束才来，relay 会一直卡住。这里只轮询进程句柄
+        /// （<c>HasExited</c>），子进程活多久就等多久，但不会被管道 EOF 拖住。
+        /// </summary>
+        private static void WaitForExitWithoutDrain(Process process)
+        {
+            if (process == null)
+            {
+                return;
+            }
+
+            while (true)
+            {
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        return;
+                    }
+                }
+                catch (Exception)
+                {
+                    // 句柄失效按“已退出”处理：退出码由 GetExitCodeSafe 兜底成 -1。
+                    return;
+                }
+
+                Thread.Sleep(20);
+            }
+        }
+
+        /// <summary>
+        /// 取消异步输出后续的事件派发；未发起过 BeginOutputReadLine/BeginErrorReadLine 或已经结束时
+        /// 静默跳过。注意：这不会让阻塞在管道读上的读者线程立即返回，也不是收尾有界的原因
+        /// （那来自 <see cref="WaitForExitWithoutDrain"/> 的句柄轮询）；它只是停止尾部输出派发。
+        /// </summary>
+        private static void CancelAsyncReaders(Process process)
+        {
+            if (process == null)
+            {
+                return;
+            }
+
+            try
+            {
+                process.CancelOutputRead();
+            }
+            catch (Exception)
+            {
+                // 没有进行中的异步读，或读已经结束：无需处理。
+            }
+
+            try
+            {
+                process.CancelErrorRead();
+            }
+            catch (Exception)
+            {
+                // 同上。
+            }
+        }
+
         private static int GetProcessIdSafe(Process process)
         {
             try
@@ -625,9 +688,16 @@ namespace gostGUI.Runner
 
                 StartCommandReader();
 
-                // 同时等待“子进程退出”与“异步输出回调排空”：无参 WaitForExit 会等 BeginOutputReadLine 结束。
-                _process.WaitForExit();
+                // 只等“子进程退出”，不等异步输出排空：无参 WaitForExit() 等价于 WaitForExit(-1)，
+                // 会在进程退出后无超时地等 AsyncStreamReader.WaitUtilEOF()。子进程的孙进程若继承
+                // 重定向 stdout/stderr 写端，EOF 要等整棵树结束才来，relay 就会一直卡在这里
+                // （子进程已退出、UI 却仍显示运行中）。HasExited 是纯句柄查询，不会被管道拖住。
+                WaitForExitWithoutDrain(_process);
                 int exitCode = GetExitCodeSafe(_process);
+
+                // 收尾阶段不再派发尚未送达的尾部输出（README 已知限制）；取消读流的事件派发，
+                // 而不是去等 EOF——等待有界性来自上面的句柄轮询。
+                CancelAsyncReaders(_process);
 
                 // 先置完成标记再发 exit：即使 UI 读完立刻关管道，读线程也不会在 exit 写出去之前抢跑 Exit。
                 _completed = true;

@@ -1,6 +1,7 @@
 // =====================================================================================
 // FormMain.Tray.cs —— 托盘与退出：通知图标、还原并抢前台、托盘菜单、关闭即隐藏、真退出。
-// 本文件是 FormMain 的 partial，成员从 FormMain.cs 原样搬来（签名/可见性/行为未改）。
+// 本文件是 FormMain 的 partial；成员最初从 FormMain.cs 原样搬来，退出路径随后在阶段二收尾中
+// 增加/修正了 R2-13/R45 的提交-保存-显形逻辑，因此不再是纯搬运。
 // =====================================================================================
 
 using System;
@@ -26,6 +27,12 @@ namespace gostGUI
         internal void TriggerFormClosingForTest()
         {
             FormMain_FormClosing(this, new FormClosingEventArgs(CloseReason.UserClosing, false));
+        }
+
+        /// <summary>自检缝：走与“系统关机/任务管理器关闭”完全相同的 FormClosing 分支。</summary>
+        internal void TriggerSystemCloseForTest()
+        {
+            FormMain_FormClosing(this, new FormClosingEventArgs(CloseReason.WindowsShutDown, false));
         }
 
         /// <summary>走与托盘“退出”完全相同的退出前提交路径（不真的 Application.Exit）。</summary>
@@ -92,11 +99,11 @@ namespace gostGUI
                 return;
             }
 
-            // 窗口可能在最后一次失焦之前就被关闭：先把详情编辑器里待提交的字段落盘。
-            CommitPendingDetailEdits();
-
             if (e.CloseReason == CloseReason.UserClosing)
             {
+                // 窗口可能在最后一次失焦之前就被关闭：先把详情编辑器里待提交的字段落盘。
+                CommitPendingDetailEdits();
+
                 // 隐藏到托盘前记住窗口几何；应用还会继续跑，失败用气泡提示。
                 PersistWindowState(false);
                 e.Cancel = true;
@@ -105,9 +112,10 @@ namespace gostGUI
                 return;
             }
 
-            // 系统关机/任务管理器等：保存但不阻塞关机。
-            _exitWindowStateAttempted = true;
-            PersistWindowState(false);
+            // 系统关机/任务管理器等：保存但不阻塞关机。R2-13：这里同样可能有待提交编辑，
+            // 提交升起的横幅会随进程消失；走与托盘退出相同的捕获/合并路径，但不弹模态框
+            // （会阻塞/延长关机，且交互桌面可能已不可用），改为托盘气泡 + 系统日志显形。
+            SaveShutdownWindowState();
         }
 
         private void FormMain_FormClosed(object sender, FormClosedEventArgs e)
@@ -143,6 +151,24 @@ namespace gostGUI
         internal void SaveExitWindowStateForTest()
         {
             SaveExitWindowState();
+        }
+
+        /// <summary>
+        /// 系统关机/任务管理器关闭时的保存：与托盘退出一样捕获提交横幅并合并进失败原因（R2-13），
+        /// 但不弹模态框——Windows 关机时模态框会阻塞/延长关机，交互桌面也可能已不可用。
+        /// 失败原因改由托盘气泡 + 当前项系统日志显形。
+        /// </summary>
+        private void SaveShutdownWindowState()
+        {
+            if (_exitWindowStateAttempted)
+            {
+                return;
+            }
+
+            _exitWindowStateAttempted = true;
+
+            string commitBanner = CommitPendingDetailEditsForExit();
+            PersistWindowState(true, commitBanner, reportWithModal: false);
         }
 
         /// <summary>

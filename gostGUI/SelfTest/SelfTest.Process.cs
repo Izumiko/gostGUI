@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
@@ -362,6 +363,45 @@ namespace gostGUI
                     Task stopTask = manager.StopProcessAsync(item, TimeSpan.FromSeconds(10));
 
                     Assert(stopTask.Wait(DirectWaitTimeoutMs), "StopProcessAsync 应在有界时间内完成");
+                    Assert(!manager.IsProcessRunning(item), "停止任务完成后不应仍在运行");
+                    AssertEqual(0, manager.GetChildPid(item));
+                }
+                finally
+                {
+                    manager.StopProcess(item);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 回归（Task 7 review）：直连子进程被 kill 后，孙进程仍持有它继承的 stdout/stderr 写端，
+        /// 所以 EOF 要等孙进程退出才到来。停止必须在有界时间内完成，不能等 AsyncStreamReader
+        /// 的 EOF 排空（`ping -n 60` 保证这个 EOF 远比测试上限晚）。
+        /// 清理：子进程在 Job 里，using 结束释放 ProcessManager 时关闭 Job，整棵树一起终止。
+        /// </summary>
+        private static void ProcessStopWithInheritedPipeCompletes()
+        {
+            using (ProcessManager manager = new ProcessManager())
+            {
+                DirectRun run = new DirectRun();
+                run.Attach(manager);
+                ConfigItem item = NewDirectItem("/d /s /c \"ping -n 60 127.0.0.1\"");
+                Assert(manager.StartProcess(item), "cmd 子进程应启动成功");
+                try
+                {
+                    // ping 是 cmd 的子进程、继承重定向管道；收到它的第一行 stdout 即证明管道确实被孙进程持有。
+                    Assert(WaitUntil(() => run.HasOutput(LogKind.Stdout, line => line.Trim().Length > 0),
+                            DirectWaitTimeoutMs),
+                        "应收到孙进程写入继承管道的 stdout：" + run.Describe());
+
+                    var elapsed = Stopwatch.StartNew();
+                    Task stopTask = manager.StopProcessAsync(item, TimeSpan.FromSeconds(5));
+                    bool completed = stopTask.Wait(DirectWaitTimeoutMs);
+                    elapsed.Stop();
+
+                    Assert(completed,
+                        "孙进程仍持有 stdout 写端时 StopProcessAsync 仍应有界完成；实际耗时 "
+                        + elapsed.ElapsedMilliseconds + " ms");
                     Assert(!manager.IsProcessRunning(item), "停止任务完成后不应仍在运行");
                     AssertEqual(0, manager.GetChildPid(item));
                 }

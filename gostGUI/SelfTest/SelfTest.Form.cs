@@ -684,12 +684,24 @@ namespace gostGUI
 
                             // ② 提交本身能落盘，但合并后的环境块超过 32K，会升起“环境变量无效”横幅。
                             // 从托盘退出时窗口已隐藏，这个横幅看不见，必须转成退出保存的失败原因。
-                            form.SetEnvTextForTest("BIG=" + new string('y', 40 * 1024));
+                            // 断言取精确值：窗口状态保存本来会成功，任何额外合并/别的失败都会让它不等。
+                            string bigValue = new string('y', 40 * 1024);
+                            var bigOverrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                { "BIG", bigValue }
+                            };
+                            string envError;
+                            gostGUI.Shared.EnvBlock.BuildEffective(
+                                gostGUI.Shared.ChildEnvironment.SnapshotParentEnvironment(),
+                                bigOverrides,
+                                out envError);
+                            Assert(!string.IsNullOrEmpty(envError), "夹具环境应超过 32K 上限。");
+                            string expectedReason = "环境变量无效：" + envError;
+
+                            form.SetEnvTextForTest("BIG=" + bigValue);
                             form.SaveExitWindowStateForTest();
 
-                            Assert(
-                                form.LastWindowSaveFailureForTest.Contains("环境变量无效"),
-                                "退出前提交升起的横幅必须转成退出保存失败原因：" + form.LastWindowSaveFailureForTest);
+                            AssertEqual(expectedReason, form.LastWindowSaveFailureForTest);
                             Assert(
                                 !form.BannerVisibleForTest,
                                 "退出路径不应把横幅留在不可见的窗口上。");
@@ -701,6 +713,156 @@ namespace gostGUI
                         ThemePaint.DpiOverride = previousPaint;
                     }
                 });
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// R2-13（系统关机/任务管理器关闭）：这条 FormClosing 分支也必须捕获提交横幅。
+        /// 它不弹模态框（会阻塞/延长系统关机），但原因必须落进 <c>_lastWindowSaveFailure</c>，
+        /// 生产路径再把它写进托盘气泡与系统日志。
+        /// </summary>
+        private static void FormSystemCloseCommitBannerIsRecorded()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                Assert(Common.SaveTo(new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "关机用例", Program = "cmd.exe", Args = string.Empty }
+                    }
+                }, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                RunOnDedicatedSta(() =>
+                {
+                    int previousDpi = FormMain.StartupDpiOverride;
+                    int previousPaint = ThemePaint.DpiOverride;
+                    FormMain.StartupDpiOverride = 96;
+                    ThemePaint.DpiOverride = 96;
+                    try
+                    {
+                        using (var form = new FormMain(true, manager))
+                        {
+                            form.SuppressDialogsForTest = true;
+                            form.SetWindowGeometryForTest(new Size(1000, 600), new Point(10, 20));
+
+                            string bigValue = new string('y', 40 * 1024);
+                            var bigOverrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                { "BIG", bigValue }
+                            };
+                            string envError;
+                            gostGUI.Shared.EnvBlock.BuildEffective(
+                                gostGUI.Shared.ChildEnvironment.SnapshotParentEnvironment(),
+                                bigOverrides,
+                                out envError);
+                            Assert(!string.IsNullOrEmpty(envError), "夹具环境应超过 32K 上限。");
+                            string expectedReason = "环境变量无效：" + envError;
+
+                            form.SetEnvTextForTest("BIG=" + bigValue);
+                            form.TriggerSystemCloseForTest();
+
+                            AssertEqual(expectedReason, form.LastWindowSaveFailureForTest);
+                            Assert(
+                                !form.BannerVisibleForTest,
+                                "系统关闭路径不应把横幅留在不可见的窗口上。");
+                        }
+                    }
+                    finally
+                    {
+                        FormMain.StartupDpiOverride = previousDpi;
+                        ThemePaint.DpiOverride = previousPaint;
+                    }
+                });
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// R2-13（提交期 SaveFailed）：提交时的配置保存失败会升起 SaveFailed 横幅。
+        /// 同一个配置文件被独占读句柄锁住，提交与窗口状态保存都会失败；断言退出失败原因
+        /// 精确等于“提交横幅；窗口状态保存失败”，证明横幅先被捕获、再与保存失败合并。
+        /// </summary>
+        private static void FormExitCommitSaveFailedBannerBecomesExitFailure()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "locked-config.json");
+                Assert(Common.SaveTo(new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "保存失败横幅", Program = "cmd.exe", Args = string.Empty }
+                    }
+                }, path), "写夹具应成功：" + Common.LastSaveError);
+
+                var manager = new ConfigurationManager(path);
+                using (var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    RunOnDedicatedSta(() =>
+                    {
+                        int previousDpi = FormMain.StartupDpiOverride;
+                        int previousPaint = ThemePaint.DpiOverride;
+                        FormMain.StartupDpiOverride = 96;
+                        ThemePaint.DpiOverride = 96;
+                        try
+                        {
+                            using (var form = new FormMain(true, manager))
+                            {
+                                form.SuppressDialogsForTest = true;
+                                form.SetWindowGeometryForTest(new Size(1000, 600), new Point(10, 20));
+
+                                // 改 env 会触发 UpdateItem → Save；文件被锁住，SaveFailed 横幅升起。
+                                // 再叠加一个超过 32K 的环境块，让同一次提交升起第二条不同的原因（环境变量无效）。
+                                string bigValue = new string('y', 40 * 1024);
+                                var bigOverrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                                {
+                                    { "BIG", bigValue }
+                                };
+                                string envError;
+                                gostGUI.Shared.EnvBlock.BuildEffective(
+                                    gostGUI.Shared.ChildEnvironment.SnapshotParentEnvironment(),
+                                    bigOverrides,
+                                    out envError);
+                                Assert(!string.IsNullOrEmpty(envError), "夹具环境应超过 32K 上限。");
+                                string envReason = "环境变量无效：" + envError;
+
+                                form.SetEnvTextForTest("BIG=" + bigValue);
+                                form.SaveExitWindowStateForTest();
+
+                                Assert(manager.SaveError.Length > 0, "夹具应让配置保存失败。");
+                                string banner = manager.SaveError;
+
+                                // 提交期的两条不同原因（先 SaveFailed，后环境变量无效）必须都保留，
+                                // 再与窗口状态保存失败（同一 SaveError）按顺序合并。
+                                AssertEqual(banner + "；" + envReason + "；" + banner,
+                                    form.LastWindowSaveFailureForTest);
+                                Assert(
+                                    form.LastWindowSaveFailureForTest.Contains(envReason),
+                                    "两条不同的提交原因都必须保留：" + form.LastWindowSaveFailureForTest);
+                                Assert(
+                                    !form.BannerVisibleForTest,
+                                    "退出路径不应把横幅留在不可见的窗口上。");
+                            }
+                        }
+                        finally
+                        {
+                            FormMain.StartupDpiOverride = previousDpi;
+                            ThemePaint.DpiOverride = previousPaint;
+                        }
+                    });
+                }
             }
             finally
             {

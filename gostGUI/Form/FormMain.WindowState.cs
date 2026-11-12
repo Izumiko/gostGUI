@@ -357,13 +357,20 @@ namespace gostGUI
                 minimumHeightDip);
         }
 
-        /// <summary>保存窗口状态；失败时记录中文原因并显形（托盘气泡或退出前模态框）。</summary>
-        /// <param name="exiting">true = 真退出路径（R45 模态框）；false = 隐藏到托盘（气泡/横幅）。</param>
+        /// <summary>
+        /// 保存窗口状态；失败时记录中文原因并按 <paramref name="reportWithModal"/> 选择显形方式：
+        /// true = 退出路径用 R45 模态框；false = 系统关机路径用托盘气泡 + 系统日志。
+        /// </summary>
+        /// <param name="exiting">true = 退出路径（托盘退出或系统关机）；false = 隐藏到托盘。</param>
         /// <param name="pendingCommitFailure">
         /// 退出前提交里已经升起的失败原因（R2-13）。非空即视为退出保存失败，即使本次窗口状态写入成功，
         /// 也要走 R45 模态框把它显形——否则隐藏窗口里的横幅会随退出一起消失。
         /// </param>
-        private void PersistWindowState(bool exiting, string pendingCommitFailure = null)
+        /// <param name="reportWithModal">
+        /// true = 退出路径用 R45 模态框；false = 系统关机/任务管理器关闭路径，不弹模态框
+        /// （会阻塞/延长关机），改由气泡 + 系统日志显形。
+        /// </param>
+        private void PersistWindowState(bool exiting, string pendingCommitFailure = null, bool reportWithModal = true)
         {
             string reason = pendingCommitFailure;
             try
@@ -423,7 +430,14 @@ namespace gostGUI
             }
 
             _lastWindowSaveFailure = reason;
-            ReportWindowStateSaveFailure(reason, exiting);
+            if (reportWithModal)
+            {
+                ReportWindowStateSaveFailure(reason, exiting);
+            }
+            else
+            {
+                ReportShutdownWindowStateSaveFailure(reason);
+            }
         }
 
         /// <summary>把“退出前提交的横幅原因”与“本次窗口状态保存失败原因”并成一条可见提示。</summary>
@@ -440,6 +454,47 @@ namespace gostGUI
             }
 
             return first + "；" + second;
+        }
+
+        /// <summary>
+        /// R2-13（系统关机/任务管理器关闭）：这里不能弹模态框——它会阻塞或延长系统关机，交互桌面也可能已不可用。
+        /// 原因改在进程结束前写进托盘气泡（尽力而为）与当前项的系统日志；同时保留在
+        /// <see cref="_lastWindowSaveFailure"/> 里，自检可直接断言。
+        /// </summary>
+        private void ReportShutdownWindowStateSaveFailure(string reason)
+        {
+            const string title = "保存窗口状态失败";
+            string text = "退出前保存窗口状态失败：" + reason + "。刚才的修改可能没有写入磁盘。";
+
+            if (SuppressDialogsForTest)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_notifyIcon != null)
+                {
+                    _notifyIcon.Visible = true;
+                    _notifyIcon.BalloonTipTitle = title;
+                    _notifyIcon.BalloonTipText = text;
+                    _notifyIcon.BalloonTipIcon = ToolTipIcon.Error;
+                    _notifyIcon.ShowBalloonTip(5000);
+                }
+            }
+            catch (Exception)
+            {
+                // 气泡不可用时继续写日志。
+            }
+
+            try
+            {
+                AppendSystemLine(GetCurrentConfigItem(), "退出前保存失败：" + reason);
+            }
+            catch (Exception)
+            {
+                // 日志视图可能已随关机释放；原因仍记录在 _lastWindowSaveFailure。
+            }
         }
 
         /// <summary>

@@ -474,6 +474,66 @@ namespace gostGUI
             }
         }
 
+        /// <summary>
+        /// 回归（终审）：relay 的子进程自己退出、但它的孙进程仍持有继承的 stdout/stderr 写端时，
+        /// runner 必须立刻发 exit 帧并关 Job，不能调用无参 WaitForExit() 等管道 EOF。
+        /// `start /b ping -n 60` 让 cmd 立即退出、ping 继续持有重定向管道；旧实现会把整个
+        /// 中转会话拖住到 ping 自然结束（60 秒）。
+        /// </summary>
+        private static void RunnerExitDoesNotWaitForInheritedPipe()
+        {
+            string runnerPath = Path.Combine(Common.GetApplicationPath(), "gostGUI.Runner.exe");
+            Assert(File.Exists(runnerPath), "找不到中转进程：" + runnerPath + "（请先构建解决方案）");
+
+            var request = new LaunchRequest
+            {
+                FileName = CmdPath(),
+                Arguments = "/d /s /c \"start /b ping -n 60 127.0.0.1\"",
+                WorkingDirectory = Path.GetTempPath(),
+                Kind = ChildKind.Executable,
+                EnvOverrides = EmptyEnv()
+            };
+
+            var output = new RunnerOutputCollector();
+            var exitReceived = new ManualResetEventSlim(false);
+            int exitCode = int.MinValue;
+            RunnerSession session = null;
+            var elapsed = Stopwatch.StartNew();
+            try
+            {
+                session = RunnerSession.StartAsync(request, RunnerLaunchMode.SameIntegrity, runnerPath,
+                    Common.GetApplicationPath(), CancellationToken.None).GetAwaiter().GetResult();
+                session.Output += output.Add;
+                session.Exited += code =>
+                {
+                    exitCode = code;
+                    exitReceived.Set();
+                };
+
+                Assert(exitReceived.Wait(RunnerWaitTimeoutMs),
+                    "子进程退出后 relay 必须立刻发 exit，不能等孙进程持有的管道 EOF：" + output.Describe());
+                elapsed.Stop();
+
+                AssertEqual(0, exitCode);
+                Assert(elapsed.ElapsedMilliseconds < 10000,
+                    "relay 应在有界时间内报告 exit（旧实现会等 ping 的 60 秒），实际 "
+                    + elapsed.ElapsedMilliseconds + " ms");
+                Notice("Runner_ExitDoesNotWaitForInheritedPipe：relay 在 "
+                    + elapsed.ElapsedMilliseconds + " ms 内报告 exit");
+                Assert(WaitUntil(() => IsProcessGone(session.ChildPid), RunnerWaitTimeoutMs),
+                    "子进程应随会话结束消失（PID " + session.ChildPid + "）");
+            }
+            finally
+            {
+                if (session != null)
+                {
+                    session.Dispose();
+                }
+
+                exitReceived.Dispose();
+            }
+        }
+
         /// <summary>当前机器上名为 gostGUI.Runner 的进程数；用完立即释放 Process 句柄。</summary>
         private static int CountRunnerProcesses()
         {

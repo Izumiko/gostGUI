@@ -497,7 +497,15 @@ namespace gostGUI
         /// 事件顺序保持不变：旧实现是 Kill 后立即 Dispose，本次构建上 20 次采样中进程退出回调均抢不过
         /// Dispose，订阅者没有观测到 ProcessExited（直连停止只报 ProcessStopped；这是实测结果，不是普遍保证，
         /// 回调时序仍取决于运行时）。这里在 kill 前显式关闭退出事件的观察者，再等待退出，因此不会多出一条
-        /// “进程已退出”的 UI 日志；kill 或等待失败的路径仍与旧实现一样只记一条日志并立刻收尾，不会白等 timeout。
+        /// “进程已退出”的 UI 日志；kill 失败时立即收尾。
+        /// </para>
+        /// <para>
+        /// 收尾等待只查询进程句柄，**不调用** <c>Process.WaitForExit(...)</c>：net48 的
+        /// <c>WaitForExit(int)</c> 只在 <c>ms == -1</c>（Timeout.Infinite）时才会在进程退出后
+        /// 无超时地等 <c>AsyncStreamReader.WaitUtilEOF()</c>，而实测 <c>CancelOutputRead()</c> /
+        /// <c>CancelErrorRead()</c> 并不能解除这个等待。直连子进程的孙进程可能继承 stdout/stderr
+        /// 写端，EOF 要等整棵进程树结束才来；这里改用 <c>HasExited</c> 轮询（纯句柄查询），
+        /// 因此等待严格受 <paramref name="timeout"/> 约束，不会被管道 EOF 拖住。
         /// </para>
         /// </summary>
         private async Task StopDirectProcessAsync(ConfigItem configItem, Process process, TimeSpan timeout)
@@ -511,8 +519,11 @@ namespace gostGUI
                     process.Kill();
                 }
 
-                // WaitForExit 也可能抛（句柄失效/等待被中断）：与 Kill 同理，记一条日志后继续 teardown。
-                await Task.Run(() => process.WaitForExit(TimeoutMilliseconds(timeout)))
+                // 主动停止不关心剩余输出；取消异步读流，避免读者继续为孙进程持有的管道排队。
+                CancelAsyncReaders(process);
+
+                // 等待本身也可能抛（句柄失效/线程被中断）：与 Kill 同理，记一条日志后继续 teardown。
+                await Task.Run(() => WaitForExitBounded(process, TimeoutMilliseconds(timeout)))
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -530,7 +541,55 @@ namespace gostGUI
             }
         }
 
-        /// <summary>把 TimeSpan 收敛成 WaitForExit 可接受的上限；非正值表示不等待（与 RunnerSession.StopAsync 一致）。</summary>
+        /// <summary>
+        /// 只查进程句柄的有界等待：每 20 ms 检查一次 <c>HasExited</c>，最多等 <paramref name="timeoutMs"/>。
+        /// 不碰异步读流，因此不会因为孙进程仍持有 stdout/stderr 写端而阻塞。
+        /// </summary>
+        private static bool WaitForExitBounded(Process process, int timeoutMs)
+        {
+            int waited = 0;
+            while (!HasExitedSafe(process))
+            {
+                if (waited >= timeoutMs)
+                {
+                    return false;
+                }
+
+                int slice = Math.Min(20, timeoutMs - waited);
+                Thread.Sleep(slice);
+                waited += slice;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 取消异步读流后续的事件派发；未发起过 BeginOutputReadLine/BeginErrorReadLine 或已经结束时
+        /// 静默跳过。注意：取消不会让阻塞在管道读上的读者线程立即返回，也不是收尾有界的原因
+        /// （那来自 <see cref="WaitForExitBounded"/> 的句柄轮询）；它只是停止主动停止后的输出派发。
+        /// </summary>
+        private static void CancelAsyncReaders(Process process)
+        {
+            try
+            {
+                process.CancelOutputRead();
+            }
+            catch (Exception)
+            {
+                // 没有进行中的异步读，或读已经结束：无需处理。
+            }
+
+            try
+            {
+                process.CancelErrorRead();
+            }
+            catch (Exception)
+            {
+                // 同上。
+            }
+        }
+
+        /// <summary>把 TimeSpan 收敛成轮询等待可接受的上限；非正值表示不等待（与 RunnerSession.StopAsync 一致）。</summary>
         private static int TimeoutMilliseconds(TimeSpan timeout)
         {
             if (timeout <= TimeSpan.Zero)

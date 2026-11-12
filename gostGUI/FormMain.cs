@@ -92,14 +92,17 @@ namespace gostGUI
         /// <summary>横幅是否处于“已显示”状态（用于自检；隐藏窗体的 Visible 会因子控件不可见而为 false）。</summary>
         private bool _bannerShown;
 
-        /// <summary>最近一次窗口状态保存失败的中文原因（空字符串表示成功或还没保存过）。</summary>
+        /// <summary>
+        /// 最近一次退出/隐藏保存失败的中文原因（含退出前提交横幅并入的原因；空字符串表示成功或还没保存过）。
+        /// </summary>
         private string _lastWindowSaveFailure = "";
 
         /// <summary>
-        /// R2-13：退出前提交期间升起的横幅消息。从托盘退出时窗口可能已经隐藏，横幅会随退出一起被销毁；
-        /// 记下原因，交给 <see cref="PersistWindowState"/> 的 R45 退出前模态框显形。
+        /// R2-13：退出前提交期间升起的全部横幅消息（按出现顺序去重）。从托盘退出或系统关机时窗口可能
+        /// 已经隐藏，横幅会随退出一起被销毁；这里累计所有不同原因，交给 <see cref="PersistWindowState"/>
+        /// 的 R45 退出模态框显形，关机路径则改由托盘气泡与系统日志显形。
         /// </summary>
-        private string _exitCommitBannerReason;
+        private readonly List<string> _exitCommitBannerReasons = new List<string>();
 
         /// <summary>为 true 时 <see cref="ShowBanner"/> 只记录原因、不上屏（退出前提交的横幅没人看得见）。</summary>
         private bool _captureExitCommitBanner;
@@ -295,17 +298,17 @@ namespace gostGUI
         }
 
         /// <summary>
-        /// 退出前的最后一次提交，并捕获这次提交里升起的横幅（R2-13）。
+        /// 退出前的最后一次提交，并捕获这次提交里升起的全部不同横幅（R2-13）。
         /// <para>
-        /// 从托盘退出时窗口可能已经隐藏：<see cref="ShowBanner"/> 此时把消息记进
-        /// <see cref="_exitCommitBannerReason"/> 而不上屏，调用方再把原因并进退出保存失败提示。
-        /// 这样“提交失败 → 窗口状态保存成功”不会再让横幅被静默丢弃。
+        /// 从托盘退出或系统关机时窗口可能已经隐藏：<see cref="ShowBanner"/> 此时把消息记进
+        /// <see cref="_exitCommitBannerReasons"/> 而不上屏，调用方再把所有原因按顺序并进退出保存失败提示
+        /// （都算错误；同一原因只记一次）。这样“提交失败 → 窗口状态保存成功”不会再让横幅被静默丢弃。
         /// </para>
         /// </summary>
-        /// <returns>退出前提交期间升起的横幅消息；没有则为 null。</returns>
+        /// <returns>退出前提交期间升起的横幅原因（多个用“；”连接，去重）；没有则为 null。</returns>
         private string CommitPendingDetailEditsForExit()
         {
-            _exitCommitBannerReason = null;
+            _exitCommitBannerReasons.Clear();
             bool previousCapture = _captureExitCommitBanner;
             _captureExitCommitBanner = true;
             try
@@ -317,8 +320,10 @@ namespace gostGUI
                 _captureExitCommitBanner = previousCapture;
             }
 
-            string reason = _exitCommitBannerReason;
-            _exitCommitBannerReason = null;
+            string reason = _exitCommitBannerReasons.Count == 0
+                ? null
+                : string.Join("；", _exitCommitBannerReasons.ToArray());
+            _exitCommitBannerReasons.Clear();
             return reason;
         }
 

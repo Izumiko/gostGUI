@@ -74,14 +74,11 @@
     <Compile Include="..\gostGUI\Shared\**\*.cs">
       <Link>Shared\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </Compile>
-    <!-- 只链接 Runner 真正编译到的 interop 文件：JobObject 的 kernel32 入口，
-         以及 ChildEnvironment 链路所需的 advapi32 声明。Runner 不碰 UI/dwm/uxtheme/shell32，
-         链接它们只会把未使用的声明带进产物。 -->
+    <!-- 只链接 Runner 真正用到的 interop 文件：JobObject 调用的 kernel32 入口。
+         实测 Runner 与 Shared 的编译集合不引用任何 advapi32 符号（ChildEnvironment 是纯 BCL 实现），
+         所以不再链接 Advapi32.cs；UI 项目仍需要它。 -->
     <Compile Include="..\gostGUI\Native\Kernel32.cs">
       <Link>Native\Kernel32.cs</Link>
-    </Compile>
-    <Compile Include="..\gostGUI\Native\Advapi32.cs">
-      <Link>Native\Advapi32.cs</Link>
     </Compile>
     <None Include="app.config" />
   </ItemGroup>

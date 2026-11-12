@@ -889,7 +889,7 @@ namespace gostGUI
             task.ContinueWith(t =>
             {
                 // 先取 Exception（标记为已观察），再记一条调试输出：泵任务没有 await 点，
-                // 逃逸的故障只能靠这里留痕，否则会被线程池静默丢弃。
+                // 逃逸的故障只能靠这里留痕，否则未观察异常会在 GC 时被静默忽略。
                 AggregateException error = t.Exception;
                 Debug.WriteLine("后台任务异常：" + error);
             }, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);

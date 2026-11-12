@@ -106,6 +106,7 @@ namespace gostGUI
             Check("Direct_NonexistentFile_ReturnsFalseWithoutThrowing", DirectNonexistentFileReturnsFalseWithoutThrowing);
             Check("Direct_GetChildPid_IsLiveThenZero", DirectGetChildPidIsLiveThenZero);
             Check("Process_StopAsyncCompletes", ProcessStopAsyncCompletes);
+            Check("Process_StopWithInheritedPipeCompletes", ProcessStopWithInheritedPipeCompletes);
             Check("Direct_ElevationRequired_IsDetected", DirectElevationRequiredIsDetected);
 
             // 边界用例放在 Direct 之后：accept 分支会触发一次性的父环境规范化，
@@ -127,6 +128,7 @@ namespace gostGUI
             // 以及决策 13 / §6.4 要求的中转身份与基础环境来源日志。
             Check("Runner_PipeHasMediumIntegrityLabel", RunnerPipeHasMediumIntegrityLabel);
             Check("Runner_DeadRelayFailsFast", RunnerDeadRelayFailsFast);
+            Check("Runner_ExitDoesNotWaitForInheritedPipe", RunnerExitDoesNotWaitForInheritedPipe);
             Check("Runner_IdentityAndBaseEnvironmentAreReported", RunnerIdentityAndBaseEnvironmentAreReported);
 
             // 提权：错误码映射、令牌提权判定与权限矩阵选路，全部是纯/本地判断，绝不弹 UAC。
@@ -195,6 +197,8 @@ namespace gostGUI
             Check("Form_DpiChange_RescalesLayout", FormDpiChangeRescalesLayout);
             Check("Form_ExitSaveFailure_IsReported", FormExitSaveFailureIsReported);
             Check("Form_ExitCommitBanner_BecomesExitFailure", FormExitCommitBannerBecomesExitFailure);
+            Check("Form_SystemCloseCommitBanner_IsRecorded", FormSystemCloseCommitBannerIsRecorded);
+            Check("Form_ExitCommitSaveFailedBanner_BecomesExitFailure", FormExitCommitSaveFailedBannerBecomesExitFailure);
 
             // Task 14 / R36：启动自动恢复只拉起 enable && !runAsAdmin 的项；管理员项跳过并只记一行日志。
             Check("Startup_SkipsAdminItems", StartupSkipsAdminItems);

@@ -3,7 +3,8 @@ root = true
 # 仓库字节现状（2026-11-12 全量扫描：git 已跟踪的文本文件 + 全部 .cs）：
 #   手写 .cs：UTF-8 无 BOM + LF；例外是 Theme/ThemeText.cs、Theme/ToggleSwitch.cs、
 #     Theme/ThemedListBox.cs，各含 1 行 CRLF（历史遗留，本任务不清洗）。
-#   VS 生成文件：当前仓库没有（Resources.Designer.cs 与 Settings.Designer.cs 均已删除）；
+#   VS 生成文件：当前没有 BOM+CRLF 的生成文件（Resources.Designer.cs 与 Settings.Designer.cs 均已删除；
+#     FormMain.Designer.cs 在根目录且是 UTF-8+LF，不落在下面的 Properties/*.Designer.cs 规则里）；
 #     [**/Properties/*.Designer.cs] 规则是前瞻性的，只约束将来重新生成的 Designer 文件。
 #   工程/解决方案：gostGUI/gostGUI.csproj 为 CRLF（无 BOM）；gostGUI.Runner/*.csproj 为 LF（无 BOM）；
 #     gostGUI.sln 为 BOM + CRLF；gostGUI.slnx 为 CRLF（无 BOM）；两个 FodyWeavers.xml 均为 BOM，
@@ -23,8 +24,8 @@ trim_trailing_whitespace = true
 charset = utf-8
 end_of_line = lf
 
-# VS 生成的 Designer 文件保持生成器的 BOM + CRLF（当前仓库没有此类文件；规则是前瞻性的，
-# 避免将来重新生成时产生整文件 diff）
+# VS 生成的 Properties/*.Designer.cs 保持生成器的 BOM + CRLF（当前没有匹配此类规则的文件；
+# 规则是前瞻性的，避免将来重新生成时产生整文件 diff）
 [**/Properties/*.Designer.cs]
 charset = utf-8-bom
 end_of_line = crlf

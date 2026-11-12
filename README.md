@@ -45,6 +45,17 @@ The committed snapshots below are rendered off-screen by the hidden `--ui-snapsh
 |---|---|
 | ![150% dark](./docs/screenshots/v1.9-150-dark.png) | ![200% dark](./docs/screenshots/v1.9-200-dark.png) |
 
+### 代码结构
+
+源码按职责分目录；`gostGUI.sln` 是权威解决方案入口（VS18 的 `gostGUI.slnx` 是它的镜像，两者包含相同的 UI + Runner 两个工程）：
+
+- `Form/`：`FormMain` 的 partial 拆分（配置列表、详情编辑器、日志面板、托盘/退出、启动、窗口状态、主题、快照），每个文件只负责一块界面职责。
+- `Native/`：按 DLL 收口的 P/Invoke 声明与互操作结构体（kernel32 / user32 / advapi32 / dwmapi / shell32 / uxtheme）。
+- `SelfTest/`：隐藏 `--selftest` 套件的 partial 拆分，按领域组织用例、断言与夹具（当前 128 个用例，全部通过时进程退出码为 0）。
+- `Shared/`：UI 与 Runner 两个进程共享编译的代码（IPC 帧、启动 spec、环境块、Job 对象，以及 `ChildKind` / `IsExternalInit` 等共享类型）。
+- `Theme/`：主题化控件、调色板与主题管理器（按钮、输入框、列表、菜单渲染等）。
+- 根目录文件：主窗体骨架（`FormMain.cs` / `FormMain.Designer.cs`）、数据与进程层（`Common` / `ConfigurationManager` / `ProcessManager`）、权限与中转（`ElevationManager` / `RunnerClient`）、启动管线（`LaunchPipeline` / `ProgramResolver` / `WindowGeometry`）、日志与入口（`LogKind` / `LogViewManager` / `Program.cs`）。
+
 ### How to use
 
 - Place `gostGUI.exe`, `gostGUI.exe.config`, `gostGUI.Runner.exe`, `gostGUI.Runner.exe.config`, and `config.json` in the same folder (see [Packaging](#packaging)).
@@ -111,7 +122,9 @@ A clean **Rebuild** (`MSBuild gostGUI.sln /t:Rebuild /p:Configuration=Release`) 
   - 全新深/浅主题界面（默认跟随系统，可手动切换并持久化）、DPI 感知、每项独立日志（三色、1000 行上限、批量刷新）。
   - 启动时的自动恢复与开机自启不再拉起管理员项，只在该项日志写 `已跳过：需要管理员权限，请手动启动`；"全部启动"仍会逐项请求 UAC。
   - 发布形态为两个 exe（各自带 `.exe.config`）+ `config.json`；必须用 Rebuild 产出，增量构建可能残留打包 dll。
+  - 内部结构现代化：`FormMain` 与 `SelfTest` 按职责拆分为 partial 文件，P/Invoke 收口到 `Native/`；除“退出时保存/提交失败现在必定显形（托盘退出模态框、系统关机气泡）”和“直连子进程停止会等到子进程真正退出后才报告完成”这两处修正外，其余均为结构变化，无行为变化。
   - 已知限制：
+    - 停止进程时，子进程已经产生但尚未派发到界面的尾部输出可能被丢弃（直连与中转路径都可能）。
     - 子进程输出按 UTF-8 解码，非 UTF-8 输出会出现替换字符。
     - UAC 无法合并：一次"全部启动"里若有多个管理员项，会连续弹多次。
     - 降权启动依赖交互式 shell 的 `explorer.exe` 令牌；没有可用 shell 令牌时会报错而不会降级。

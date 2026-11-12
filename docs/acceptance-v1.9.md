@@ -2,7 +2,7 @@
 
 > 适用版本：`gostGUI v1.9`（两个 exe 版本均为 `1.9.0.0`，产品版本 `1.9`）
 > 前置：已用 **Rebuild** 产出 `gostGUI\bin\Release`（两个 exe + 两个 `.exe.config` + `config.json`，无散落第三方 dll）。
-> 自动化已覆盖：构建、`--selftest`（121 个用例）、`--runner-smoke`、离屏快照（96/150/200%）。以下两类原“人工检查项”已完全自动化，不再列入下面的清单：
+> 自动化已覆盖：构建、`--selftest`（128 个用例）、`--runner-smoke`、离屏快照（96/150/200%）。以下两类原“人工检查项”已完全自动化，不再列入下面的清单：
 > - **升级兼容**（旧 v1.8 配置只留 `name/enable/program/args`）：`Load_OldFormat_GetsDefaults`、`Save_ThenLoad_RoundTripsNewFields`。
 > - **路径解析**（裸命令 / PATH / PATHEXT / 引号 / 相对路径 / `%VAR%` 与实时解析提示）：`Resolve_*`、`Pipeline_*`、`Form_ResolvesProgramHint`、`Form_EnvPathEditRefreshesHint`。
 > 本文件只列**必须真人操作**的条目；每条都写死了预期结果，请逐条记录“通过 / 失败（现象）”。
@@ -14,6 +14,7 @@
 2. 准备一个 `requestedExecutionLevel=requireAdministrator` 的程序作为“管理员项”（例如系统自带的 `msconfig.exe`，或带管理员清单的测试程序）。
 3. 按被测场景分别以**标准权限**和**管理员权限**启动 `gostGUI.exe`（管理员启动请右键 →“以管理员身份运行”）。
 4. 每轮开始前把 `config.json` 备份一份，结束时恢复。
+5. 发布门禁要求先用干净 `Rebuild` 产出完整文件集：`gostGUI.exe`、`gostGUI.Runner.exe`、`config.json` 三个文件 + 两个 `.exe.config`，且 **0 个散落 dll**；增量构建的残留不算数。
 
 ## 清单
 
