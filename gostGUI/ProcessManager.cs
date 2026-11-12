@@ -209,13 +209,19 @@ namespace gostGUI
                     {
                         startupError = "启动失败：中转进程没有返回有效会话。";
                     }
-                    else if (launchMode.Value == RunnerLaunchMode.Elevated)
+                    else
                     {
-                        // 提权路径的子进程身份由 UAC 令牌决定（可能是在 UAC 里输入的另一管理员账号），
-                        // 这一行按设计 §6.4 显式说明，避免用户对 %APPDATA% / 盘符权限困惑。
+                        // 设计决策 13 / §6.4：每个中转会话都记一行真实身份与基础环境来源。
+                        // runner 可能被 UAC 换成了另一个管理员账号，所以写 runner 的实际令牌身份；
+                        // 基础环境只保证“本项 env 覆盖一定生效”，不保证与 UI 进程逐字相同。
                         TryLogSystem(configItem,
-                            "已以管理员身份启动中转进程（当前操作员：" + ElevationManager.CurrentUserName()
-                            + "；若在 UAC 中输入了其他管理员账号，子进程以该账号身份运行）。");
+                            "中转进程身份：" + session.RunnerIdentity
+                            + "；子进程基础环境：" + session.BaseEnvironmentSource + "。");
+                        if (launchMode.Value == RunnerLaunchMode.Elevated)
+                        {
+                            TryLogSystem(configItem,
+                                "已以管理员身份启动中转进程（若在 UAC 中输入了其他管理员账号，子进程以该账号身份运行）。");
+                        }
                     }
                 }
                 catch (Win32Exception ex)

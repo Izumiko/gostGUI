@@ -17,8 +17,9 @@ It just runs silently in the background.
   - **Dual privilege model**: admin items are elevated explicitly, and items launched while gostGUI itself is elevated are de-elevated to the shell token (see [Privilege model](#privilege-model)).
 - **Process Control**:
   - Start and Stop individual processes.
-  - Start All / Stop All enabled processes with a single click.
-  - The `Enable` flag records "running / was running" and decides what "Start All" starts. Items marked **run as administrator** are skipped by startup auto-restore and by Windows autostart; only an explicit Start / Start All asks for UAC (one prompt per such item).
+  - Start All / Stop All with a single click.
+  - **全部启动** force-enables **every** item (including items whose `enable` is `false`, and disabled admin items) and then starts all of them. Because it also starts admin items, it may raise one UAC prompt per admin item. Startup auto-restore and Windows autostart are the **only** paths that filter by `enable`.
+  - The `Enable` flag records "running / was running" and decides what startup auto-restore and Windows autostart start — **not** what 全部启动 starts. Items marked **run as administrator** are skipped by startup auto-restore and by Windows autostart; only an explicit Start / Start All asks for UAC.
 - **Robust Operation**:
   - Child processes run silently in the background without a visible console window.
   - **Automatic Cleanup**: All managed child processes are automatically terminated when gostGUI exits, even if it crashes, preventing orphaned processes.
@@ -50,7 +51,7 @@ The committed snapshots below are rendered off-screen by the hidden `--ui-snapsh
 - Select a program (full path, bare command name, or drag-and-drop) and type its arguments.
 - Optionally set a working directory and environment variables for that item.
 - Press **启动** to start it. Enable **以管理员身份运行** for programs that need elevation.
-- **全部启动** starts every enabled item; admin items prompt once each.
+- **全部启动** force-enables and starts **every** item, including disabled ones; admin items then prompt once each, so it may raise several UAC prompts.
 - Closing the window hides it to the tray; use the tray **退出** to quit.
 
 ### Configuration (`config.json`)
@@ -63,9 +64,9 @@ The committed snapshots below are rendered off-screen by the hidden `--ui-snapsh
 | `theme` | `string` | `"system"` | `system` \| `light` \| `dark`. Invalid values fall back to `system`. |
 | `window` | `object` | `{w:1024,h:640,x:-1,y:-1,max:false,dpi:96}` | Window geometry stored in **DIP**; `x`/`y` of `-1` lets Windows choose. `dpi` records the DPI at capture time. |
 | `items[].name` | `string` | — | Unique display name of the item. |
-| `items[].enable` | `bool` | `false` | "Running / was running"; decides whether Start All and startup auto-restore include the item. |
-| `items[].program` | `string` | `""` | Full path or bare command name. Resolved as described in the feature list. |
-| `items[].args` | `string` | `""` | Command-line arguments, passed verbatim. |
+| `items[].enable` | `bool` | `false` | "Running / was running". Startup auto-restore and Windows autostart start only enabled items; **全部启动** ignores this flag and force-enables + starts **every** item. |
+| `items[].program` | `string` | `null` (未设置) | Full path or bare command name. Resolved as described in the feature list. `null`/absent means no program is configured and the item cannot start. |
+| `items[].args` | `string` | `null` (未设置) | Command-line arguments, passed verbatim. `null`/absent means no arguments (not an empty argument list). |
 | `items[].workDir` | `string` | `""` | Working directory. **Empty = the folder containing gostGUI.exe.** Supports `%VAR%` and paths relative to the application folder. |
 | `items[].env` | `object` | `null` (absent) | Incremental overrides merged **over the parent environment** (case-insensitive). Values support `%VAR%`. `null`/absent means no overrides. |
 | `items[].runAsAdmin` | `bool` | `false` | Run the item elevated (see [Privilege model](#privilege-model)). |
@@ -87,7 +88,7 @@ Notes:
 - **One UAC prompt per admin item**; prompts cannot be merged. The runner holds the pipes, so admin items still stream real-time stdout/stderr, can be stopped, and are cleaned up with the process tree.
 - Cancelling UAC logs `已取消管理员授权` in that item's log; nothing starts and gostGUI does not crash.
 - A failed elevation or de-elevation is reported as an error. gostGUI **never** silently falls back to inheriting the launcher's privileges; if de-elevation is impossible, the log explicitly tells you to run gostGUI as a standard user instead.
-- Admin items are excluded from startup auto-restore and Windows autostart. They get exactly one line in their own log — `已跳过：需要管理员权限，请手动启动` — and no prompt is shown; **全部启动** still starts them (one prompt each).
+- Admin items are excluded from startup auto-restore and Windows autostart. They get exactly one line in their own log — `已跳过：需要管理员权限，请手动启动` — and no prompt is shown; **全部启动** still force-enables and starts them (one prompt each).
 - `GOSTGUI_FORCE_RUNNER=1` forces every item through the relay (same integrity, plain `CreateProcess`) to test the runner path without UAC.
 
 ### Packaging

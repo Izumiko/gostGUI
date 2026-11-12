@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
@@ -55,12 +56,23 @@ namespace gostGUI
         /// <summary>正常收到 exit 帧后，等待 runner 自己退出的上限。</summary>
         private const int RunnerExitWaitMs = 2000;
 
+        /// <summary>连接等待期间轮询 runner 是否已退出的间隔：死掉的中转进程必须尽快失败，不能等满 15/60 秒。</summary>
+        private const int RunnerExitPollMs = 50;
+
+        /// <summary>中等完整性级别 SID（S-1-16-8192），管道强制标签的目标。</summary>
+        private const string MediumIntegritySid = "S-1-16-8192";
+
+        /// <summary>读不到 runner 令牌身份时的固定中文兜底。</summary>
+        internal const string UnknownRunnerIdentity = "无法读取身份";
+
         private readonly NamedPipeServerStream _pipe;
         private readonly Process _runner;
         private readonly StreamReader _reader;
         private readonly TaskCompletionSource<int> _exitSource = new TaskCompletionSource<int>();
         private readonly Thread _readerThread;
         private readonly int _childPid;
+        private readonly string _runnerIdentity;
+        private readonly string _baseEnvironmentSource;
 
         private readonly object _writeGate = new object();
         private readonly object _outputEventGate = new object();
@@ -80,17 +92,22 @@ namespace gostGUI
         private int _pendingExitCode;
         private int _exitRaised;
         private int _eofNoticeRaised;
+        private int _stopTimedOut;
         private int _disposed;
         private bool _transportDisposed;
         private bool _runnerHandleDisposed;
         private Task _stopTask;
 
-        private RunnerSession(NamedPipeServerStream pipe, Process runner, StreamReader reader, int childPid)
+        private RunnerSession(NamedPipeServerStream pipe, Process runner, StreamReader reader, int childPid,
+            RunnerLaunchMode mode)
         {
             _pipe = pipe;
             _runner = runner;
             _reader = reader;
             _childPid = childPid;
+            _baseEnvironmentSource = DescribeBaseEnvironment(mode);
+            // 尽力读取 runner 的真实身份：UAC 可能把它换成了另一个管理员账号，日志必须写实际值而不是 UI 令牌。
+            _runnerIdentity = ReadProcessUserName(runner) ?? UnknownRunnerIdentity;
             _readerThread = new Thread(ReadLoop)
             {
                 IsBackground = true,
@@ -102,6 +119,24 @@ namespace gostGUI
         public int ChildPid
         {
             get { return _childPid; }
+        }
+
+        /// <summary>
+        /// runner 进程令牌里的实际身份（域\用户名）；打不开令牌或无法映射账号时固定为
+        /// <see cref="UnknownRunnerIdentity"/>（“无法读取身份”），绝不冒充 UI 令牌的身份。
+        /// </summary>
+        public string RunnerIdentity
+        {
+            get { return _runnerIdentity; }
+        }
+
+        /// <summary>
+        /// 子进程继承的基础环境来源（设计决策 13 / §6.4）：提权路径是提权令牌，降权路径是标准用户令牌，
+        /// 同权限路径就是当前进程。runner 只保证本项 env 覆盖一定生效，不保证基础环境与 UI 进程逐字相同。
+        /// </summary>
+        public string BaseEnvironmentSource
+        {
+            get { return _baseEnvironmentSource; }
         }
 
         /// <summary>
@@ -320,7 +355,7 @@ namespace gostGUI
                 // --spec / --spec-file 的装配由上面共用，管道服务器、握手、帧翻译与停止逻辑完全一致。
                 runner = StartRunnerProcess(runnerPath, runnerArguments, baseDir, mode);
 
-                await WaitForConnectionAsync(connectionTask, ct, connectTimeoutMs).ConfigureAwait(false);
+                await WaitForConnectionAsync(connectionTask, runner, ct, connectTimeoutMs).ConfigureAwait(false);
 
                 reader = new StreamReader(server, new UTF8Encoding(false), false, 4096, true);
                 DateTime deadline = DateTime.UtcNow.AddMilliseconds(HandshakeTimeoutMs);
@@ -392,7 +427,7 @@ namespace gostGUI
                         "中转进程握手失败：收到未知帧「" + (frame.Type ?? "") + "」。");
                 }
 
-                var session = new RunnerSession(server, runner, reader, childPid);
+                var session = new RunnerSession(server, runner, reader, childPid, mode);
                 foreach (KeyValuePair<LogKind, string> line in preStartOutput)
                 {
                     session.RaiseOutput(line.Key, line.Value);
@@ -453,15 +488,192 @@ namespace gostGUI
             return commandLine.Length > StandardUserCommandLineLimit;
         }
 
-        private static NamedPipeServerStream CreatePipeServer(string pipeName, bool grantInteractiveUser)
+        internal static NamedPipeServerStream CreatePipeServer(string pipeName, bool grantInteractiveUser)
         {
             if (CurrentUserSid() == null)
             {
                 throw new InvalidOperationException("无法获取当前用户，不能创建中转进程命名管道。");
             }
 
-            return new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
+            var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous, 4096, 4096, BuildPipeSecurity(grantInteractiveUser));
+            try
+            {
+                // 命名管道必须显式把强制完整性标签降为“中等”：提权 UI（High IL）创建的管道默认自动带上
+                // High 标签 + NO_WRITE_UP，而降权出来的 runner 是 Medium IL，读写打开会被拒绝（错误码 5），
+                // runner 随后以退出码 4 结束——“提权 gostGUI + 非管理员项”就是坏在这条隐式标签上。
+                // 反方向（Medium 服务器、High 客户端）默认就能写，所以历史规格只描述过那一种。
+                // 这里只改强制标签，不动 DACL：DACL 仍由 BuildPipeSecurity 的主体授予，不因标签放宽任何访问。
+                ApplyMediumIntegrityLabel(server.SafePipeHandle.DangerousGetHandle());
+                return server;
+            }
+            catch
+            {
+                TryDispose(server);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// 给命名管道对象设置 Medium 强制标签（SDDL 等价于 <c>S:(ML;;NW;;;ME)</c>）：
+        /// 一个 <c>SYSTEM_MANDATORY_LABEL_ACE</c>，SID 为 <c>S-1-16-8192</c>，策略 <c>NO_WRITE_UP</c>。
+        /// 通过 <c>SetSecurityInfo(..., LABEL_SECURITY_INFORMATION)</c> 写入 SACL 槽；每个启动模式都必须调用，
+        /// 因为任何 runner（含同权限）都不低于 Medium，而 Medium 标签不会挡住 High 客户端写入。
+        /// </summary>
+        private static void ApplyMediumIntegrityLabel(IntPtr pipeHandle)
+        {
+            IntPtr sidBuffer = IntPtr.Zero;
+            IntPtr aclBuffer = IntPtr.Zero;
+            try
+            {
+                var mediumLabel = new SecurityIdentifier(MediumIntegritySid);
+                byte[] sidBytes = new byte[mediumLabel.BinaryLength];
+                mediumLabel.GetBinaryForm(sidBytes, 0);
+                sidBuffer = Marshal.AllocHGlobal(sidBytes.Length);
+                Marshal.Copy(sidBytes, 0, sidBuffer, sidBytes.Length);
+
+                // ACL 头（8）+ ACE 头（4）+ 强制策略掩码（4）+ SID。
+                int aclLength = 8 + 4 + 4 + sidBytes.Length;
+                aclBuffer = Marshal.AllocHGlobal(aclLength);
+                if (!InitializeAcl(aclBuffer, (uint)aclLength, AclRevision))
+                {
+                    throw LabelFailure("初始化管道强制标签 ACL");
+                }
+
+                if (!AddMandatoryAce(aclBuffer, AclRevision, 0, SystemMandatoryLabelNoWriteUp, sidBuffer))
+                {
+                    throw LabelFailure("写入管道强制标签 ACE");
+                }
+
+                uint result = SetSecurityInfo(pipeHandle, SeKernelObject, LabelSecurityInformation,
+                    IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, aclBuffer);
+                if (result != 0)
+                {
+                    throw new InvalidOperationException(
+                        "无法为命名管道设置中等完整性标签（Windows 错误码 " + result + "），降权中转进程将无法连接管道。");
+                }
+            }
+            finally
+            {
+                if (aclBuffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(aclBuffer);
+                }
+
+                if (sidBuffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(sidBuffer);
+                }
+            }
+        }
+
+        private static InvalidOperationException LabelFailure(string operation)
+        {
+            return new InvalidOperationException(operation + "失败（Windows 错误码 "
+                + Marshal.GetLastWin32Error() + "），降权中转进程将无法连接管道。");
+        }
+
+        /// <summary>决定一次中转会话“子进程基础环境”来源的日志文案（设计决策 13 / §6.4）。</summary>
+        internal static string DescribeBaseEnvironment(RunnerLaunchMode mode)
+        {
+            switch (mode)
+            {
+                case RunnerLaunchMode.Elevated:
+                    return "继承自提权令牌";
+                case RunnerLaunchMode.StandardUser:
+                    return "继承自标准用户令牌";
+                default:
+                    return "继承自当前进程";
+            }
+        }
+
+        /// <summary>
+        /// 尽力读取进程令牌的 TokenUser（域\用户名），供启动日志写“中转进程身份”。
+        /// 跨权限句柄可能打不开、SID 也可能无法映射到账号：任何失败都返回 null，由调用方写“无法读取身份”。
+        /// </summary>
+        private static string ReadProcessUserName(Process process)
+        {
+            if (process == null)
+            {
+                return null;
+            }
+
+            IntPtr hProcess = IntPtr.Zero;
+            IntPtr token = IntPtr.Zero;
+            IntPtr buffer = IntPtr.Zero;
+            try
+            {
+                // OpenProcessToken 需要进程句柄带 PROCESS_QUERY_INFORMATION；实现上 Vista+ 也接受
+                // PROCESS_QUERY_LIMITED_INFORMATION，但只开 LIMITED 在部分令牌/跨权限场景会被拒绝，
+                // 身份就会静默落到“无法读取身份”。先按两者合一打开（同用户 runner 一定够权）；
+                // 个别跨权限句柄只允许 LIMITED 时再退回它。
+                hProcess = OpenProcess(ProcessQueryInformation | ProcessQueryLimitedInformation, false, process.Id);
+                if (hProcess == IntPtr.Zero)
+                {
+                    hProcess = OpenProcess(ProcessQueryLimitedInformation, false, process.Id);
+                }
+
+                if (hProcess == IntPtr.Zero)
+                {
+                    return null;
+                }
+
+                if (!OpenProcessToken(hProcess, TokenQuery, out token))
+                {
+                    return null;
+                }
+
+                uint needed;
+                GetTokenInformation(token, TokenUserInformation, IntPtr.Zero, 0, out needed);
+                if (needed == 0)
+                {
+                    return null;
+                }
+
+                buffer = Marshal.AllocHGlobal((int)needed);
+                if (!GetTokenInformation(token, TokenUserInformation, buffer, needed, out needed))
+                {
+                    return null;
+                }
+
+                IntPtr sidPointer = Marshal.ReadIntPtr(buffer);
+                if (sidPointer == IntPtr.Zero)
+                {
+                    return null;
+                }
+
+                var sid = new SecurityIdentifier(sidPointer);
+                try
+                {
+                    return sid.Translate(typeof(NTAccount)).Value;
+                }
+                catch (Exception)
+                {
+                    // 账号已删除等无法映射的 SID：至少把 SID 本身写进日志。
+                    return sid.Value;
+                }
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+
+                if (token != IntPtr.Zero)
+                {
+                    CloseHandle(token);
+                }
+
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
+            }
         }
 
         /// <summary>命名管道/临时 spec 文件共用的显式 ACL 主体（见 <see cref="BuildAclSids"/>）。</summary>
@@ -553,12 +765,46 @@ namespace gostGUI
             return runner;
         }
 
-        private static async Task WaitForConnectionAsync(Task connectionTask, CancellationToken ct, int timeoutMs)
+        /// <summary>
+        /// 等 runner 连上管道，同时轮询 runner 是否已经退出：死掉的中转进程不能伪装成 15/60 秒连接超时。
+        /// 只能观察到 runner 的退出时立刻抛中文错误（带真实退出码）；活着或无法观察（跨权限句柄没有
+        /// SYNCHRONIZE）的 runner 仍保持原有的“连接 vs 超时”语义。
+        /// </summary>
+        private static async Task WaitForConnectionAsync(Task connectionTask, Process runner,
+            CancellationToken ct, int timeoutMs)
         {
-            Task timeoutTask = Task.Delay(timeoutMs, ct);
-            Task winner = await Task.WhenAny(connectionTask, timeoutTask).ConfigureAwait(false);
-            if (winner != connectionTask)
+            var stopWatching = new CancellationTokenSource();
+            CancellationToken watchToken = stopWatching.Token;
+            try
             {
+                Task<bool> exitTask = WatchRunnerExitAsync(runner, watchToken);
+                Task timeoutTask = Task.Delay(timeoutMs, ct);
+                Task winner = await Task.WhenAny(connectionTask, exitTask, timeoutTask).ConfigureAwait(false);
+
+                if (winner == connectionTask)
+                {
+                    await connectionTask.ConfigureAwait(false);
+                    return;
+                }
+
+                if (winner == exitTask && exitTask.Result)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    throw new InvalidOperationException("中转进程已退出（错误码 " + GetRunnerExitCode(runner)
+                        + "），未能连接管道。");
+                }
+
+                if (winner == exitTask)
+                {
+                    // 无法观察 runner（例如跨权限句柄打不开）：退回原语义，只等连接或超时。
+                    winner = await Task.WhenAny(connectionTask, timeoutTask).ConfigureAwait(false);
+                    if (winner == connectionTask)
+                    {
+                        await connectionTask.ConfigureAwait(false);
+                        return;
+                    }
+                }
+
                 if (ct.IsCancellationRequested)
                 {
                     throw new OperationCanceledException(ct);
@@ -566,8 +812,53 @@ namespace gostGUI
 
                 throw new TimeoutException("中转进程在 " + (timeoutMs / 1000) + " 秒内未连上命名管道。");
             }
+            finally
+            {
+                stopWatching.Cancel();
+                stopWatching.Dispose();
+            }
+        }
 
-            await connectionTask.ConfigureAwait(false);
+        /// <summary>
+        /// 轮询 runner 是否退出，作为连接等待的分支。返回 true 表示确认已退出；false 表示无法观察
+        /// （跨权限句柄可能没有 SYNCHRONIZE）或已被取消。轮询而不是 WaitForExit 阻塞线程：
+        /// 连接成功后要立刻停掉观察，不能让一个线程陪着子进程活到结束。
+        /// </summary>
+        private static Task<bool> WatchRunnerExitAsync(Process runner, CancellationToken stop)
+        {
+            return Task.Run(() =>
+            {
+                try
+                {
+                    while (!stop.IsCancellationRequested)
+                    {
+                        if (runner.HasExited)
+                        {
+                            return true;
+                        }
+
+                        Thread.Sleep(RunnerExitPollMs);
+                    }
+                }
+                catch (Exception)
+                {
+                    // 已取消（令牌源已释放）或句柄失效：按“无法观察”收手，绝不把异常漏到线程池。
+                }
+
+                return false;
+            });
+        }
+
+        private static int GetRunnerExitCode(Process runner)
+        {
+            try
+            {
+                return runner.ExitCode;
+            }
+            catch (Exception)
+            {
+                return -1;
+            }
         }
 
         /// <summary>有上限地读一帧；ReadLine 是阻塞调用，放进线程池并靠 WhenAny 加超时。</summary>
@@ -791,7 +1082,11 @@ namespace gostGUI
         {
             if (Interlocked.Exchange(ref _eofNoticeRaised, 1) == 0)
             {
-                RaiseOutput(LogKind.System, "中转进程异常退出");
+                // 停止超时后主动杀 runner 也会让读线程看到 EOF：这是预期收尾，不能说成“异常退出”。
+                RaiseOutput(LogKind.System,
+                    Volatile.Read(ref _stopTimedOut) != 0
+                        ? "停止超时，已强制结束中转进程"
+                        : "中转进程异常退出");
             }
         }
 
@@ -901,6 +1196,8 @@ namespace gostGUI
                 }
 
                 // R27：没有等到 exit 就杀 runner；runner 的 Job（KILL_ON_JOB_CLOSE）会带走它的子进程树。
+                // 先记下“这是停止超时的主动强杀”，读线程随后看到的 EOF 才不会写成“中转进程异常退出”。
+                Interlocked.Exchange(ref _stopTimedOut, 1);
                 KillRunnerNow();
 
                 Task afterKill = await Task.WhenAny(_exitSource.Task, Task.Delay(ForceKillWaitMs))
@@ -1095,5 +1392,43 @@ namespace gostGUI
                 // 删不掉临时文件只影响清理；runner 读完后也会自己删。
             }
         }
+
+        // =====================================================================================
+        // 强制完整性标签与 runner 身份查询的原生入口（只在 Windows 上运行，net48 没有托管替代）。
+        // =====================================================================================
+
+        private const int TokenUserInformation = 1;
+        private const int SeKernelObject = 6;
+        private const uint TokenQuery = 0x0008;
+        private const uint ProcessQueryInformation = 0x0400;
+        private const uint ProcessQueryLimitedInformation = 0x1000;
+        private const uint LabelSecurityInformation = 0x00000010;
+        private const uint SystemMandatoryLabelNoWriteUp = 0x00000001;
+        private const uint AclRevision = 2;
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool InitializeAcl(IntPtr pAcl, uint nAclLength, uint dwAclRevision);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool AddMandatoryAce(IntPtr pAcl, uint dwAceRevision, uint aceFlags,
+            uint mandatoryPolicy, IntPtr pLabelSid);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint SetSecurityInfo(IntPtr handle, int objectType, uint securityInfo,
+            IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint desiredAccess,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, int processId);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out IntPtr token);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetTokenInformation(IntPtr token, int informationClass, IntPtr information,
+            uint informationLength, out uint returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
     }
 }

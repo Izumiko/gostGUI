@@ -128,6 +128,12 @@ namespace gostGUI
             Check("Runner_SpecFileFallback_RelaysOutput", RunnerSpecFileFallbackRelaysOutput);
             Check("Runner_ForceRunnerRouting_RelaysAndStops", RunnerForceRunnerRoutingRelaysAndStops);
 
+            // 终审回归：管道强制标签（降权 runner 必须能读写 High 服务器建的管道）、死 runner 快速失败、
+            // 以及决策 13 / §6.4 要求的中转身份与基础环境来源日志。
+            Check("Runner_PipeHasMediumIntegrityLabel", RunnerPipeHasMediumIntegrityLabel);
+            Check("Runner_DeadRelayFailsFast", RunnerDeadRelayFailsFast);
+            Check("Runner_IdentityAndBaseEnvironmentAreReported", RunnerIdentityAndBaseEnvironmentAreReported);
+
             // 提权：错误码映射、令牌提权判定与权限矩阵选路，全部是纯/本地判断，绝不弹 UAC。
             // 真实的提权启动路径（点“启动”看 UAC）属于人工清单，不在自检里模拟。
             Check("Elev_DescribeWin32Error_IsDistinctAndChinese", ElevDescribeWin32ErrorIsDistinctAndChinese);
@@ -3351,6 +3357,74 @@ namespace gostGUI
         }
 
         /// <summary>
+        /// 用例专用的管道强制标签读回探针：与生产写入路径各自独立声明 P/Invoke，
+        /// 用 GetSecurityInfo(LABEL_SECURITY_INFORMATION) + SDDL 转换证明标签真的落在管道对象上。
+        /// </summary>
+        private static class PipeLabelProbe
+        {
+            private const int SeKernelObject = 6;
+            private const uint LabelSecurityInformation = 0x00000010;
+            private const uint SddlRevision1 = 1;
+
+            public static string ReadLabelSddl(IntPtr pipeHandle)
+            {
+                IntPtr owner = IntPtr.Zero;
+                IntPtr group = IntPtr.Zero;
+                IntPtr dacl = IntPtr.Zero;
+                IntPtr sacl = IntPtr.Zero;
+                IntPtr descriptor = IntPtr.Zero;
+                IntPtr text = IntPtr.Zero;
+                try
+                {
+                    uint result = GetSecurityInfo(pipeHandle, SeKernelObject, LabelSecurityInformation,
+                        out owner, out group, out dacl, out sacl, out descriptor);
+                    if (result != 0 || descriptor == IntPtr.Zero)
+                    {
+                        return null;
+                    }
+
+                    uint textLength;
+                    if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, SddlRevision1,
+                            LabelSecurityInformation, out text, out textLength) || text == IntPtr.Zero)
+                    {
+                        return null;
+                    }
+
+                    return Marshal.PtrToStringUni(text);
+                }
+                catch (Exception)
+                {
+                    return null;
+                }
+                finally
+                {
+                    if (text != IntPtr.Zero)
+                    {
+                        LocalFree(text);
+                    }
+
+                    if (descriptor != IntPtr.Zero)
+                    {
+                        LocalFree(descriptor);
+                    }
+                }
+            }
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            private static extern uint GetSecurityInfo(IntPtr handle, int objectType, uint securityInfo,
+                out IntPtr psidOwner, out IntPtr psidGroup, out IntPtr pDacl, out IntPtr pSacl,
+                out IntPtr ppSecurityDescriptor);
+
+            [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+            private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(
+                IntPtr securityDescriptor, uint stringSecurityDescriptorRevision, uint securityInformation,
+                out IntPtr stringSecurityDescriptor, out uint stringSecurityDescriptorLength);
+
+            [DllImport("kernel32.dll")]
+            private static extern IntPtr LocalFree(IntPtr handle);
+        }
+
+        /// <summary>
         /// R12 的 `&gt;` 比较边界：环境块恰好 32767 字节必须接受，32768 字节必须拒绝。
         /// 先跑拒绝分支（守卫不触发规范化），再用同一父环境口径跑接受分支（它才会触发一次性规范化）。
         /// </summary>
@@ -3810,6 +3884,10 @@ namespace gostGUI
                 Assert(manager.IsProcessRunning(configItem), "启动后应报告运行中");
                 Assert(WaitUntil(() => CountRunnerProcesses() > 0, RunnerWaitTimeoutMs),
                     "应观察到中转进程在运行");
+                Assert(WaitUntil(() => output.Has(LogKind.System, "中转进程身份"), RunnerWaitTimeoutMs),
+                    "中转启动日志应包含 runner 的实际身份：" + output.Describe());
+                Assert(output.Has(LogKind.System, "继承自当前进程"),
+                    "同权限中转启动日志应说明基础环境继承自当前进程：" + output.Describe());
                 Assert(WaitUntil(() => output.Has(LogKind.Stdout, "forced"), RunnerWaitTimeoutMs),
                     "强制 runner 路径应转发 stdout：" + output.Describe());
                 Assert(WaitUntil(() => output.Has(LogKind.Stderr, "routed"), RunnerWaitTimeoutMs),
@@ -3849,6 +3927,136 @@ namespace gostGUI
                 {
                     process.Dispose();
                 }
+            }
+        }
+
+        /// <summary>
+        /// 评审 CRITICAL 的回归用例：提权 UI（High IL）创建的命名管道默认带 High 强制标签 + NO_WRITE_UP，
+        /// 降权 runner（Medium IL）读写打开会被拒绝（runner 退出码 4）。生产函数必须把强制标签改成 Medium。
+        /// 这里实际调用 <see cref="RunnerSession.CreatePipeServer"/> 建管道，再用独立 P/Invoke 读回标签，
+        /// 断言 SDDL 含 <c>S:(ML;;NW;;;ME)</c>；普通与降权两种 DACL 口径都要带标签。
+        /// </summary>
+        private static void RunnerPipeHasMediumIntegrityLabel()
+        {
+            foreach (bool grantInteractiveUser in new[] { false, true })
+            {
+                string pipeName = "gostgui.label." + Guid.NewGuid().ToString("N");
+                using (NamedPipeServerStream server = RunnerSession.CreatePipeServer(pipeName, grantInteractiveUser))
+                {
+                    string sddl = PipeLabelProbe.ReadLabelSddl(server.SafePipeHandle.DangerousGetHandle());
+                    Assert(!string.IsNullOrEmpty(sddl),
+                        "应能读回命名管道的强制标签 SDDL（grantInteractiveUser=" + grantInteractiveUser + "）");
+                    Assert(sddl.Contains("S:(ML;;NW;;;ME)"),
+                        "命名管道必须带中等完整性标签 S:(ML;;NW;;;ME)，实际：" + sddl);
+                    Assert(!sddl.Contains("HI"), "命名管道不能保留 High 强制标签：" + sddl);
+                }
+            }
+
+            Notice("Runner_PipeHasMediumIntegrityLabel：生产管道（两种 DACL 口径）读回 S:(ML;;NW;;;ME)");
+        }
+
+        /// <summary>
+        /// 评审 IMPORTANT 2 的回归用例：runner 在连上管道前就死掉时，必须快速失败并带出真实退出码，
+        /// 不能让用户看 15/60 秒的“管道连接超时”。用 whoami.exe 冒充中转进程——它对 --spec 参数
+        /// 立即报错退出（退出码 1），绝不会连上管道。
+        /// </summary>
+        private static void RunnerDeadRelayFailsFast()
+        {
+            string fakeRunner = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System), "whoami.exe");
+            Assert(File.Exists(fakeRunner), "找不到 whoami.exe，无法构造“死掉的中转进程”夹具：" + fakeRunner);
+
+            var request = new LaunchRequest
+            {
+                FileName = CmdPath(),
+                Arguments = "/d /s /c \"exit 0\"",
+                WorkingDirectory = Path.GetTempPath(),
+                Kind = ChildKind.Executable,
+                EnvOverrides = EmptyEnv()
+            };
+
+            Exception failure = null;
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                RunnerSession.StartAsync(request, RunnerLaunchMode.SameIntegrity, fakeRunner,
+                    Common.GetApplicationPath(), CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+            finally
+            {
+                stopwatch.Stop();
+            }
+
+            Assert(failure != null, "冒充 runner 的进程立即离开后 StartAsync 必须失败");
+            Assert(!(failure is TimeoutException), "死掉的中转进程不能被报成连接超时：" + failure.Message);
+            Assert(stopwatch.ElapsedMilliseconds < 5000,
+                "死掉的中转进程必须在连接超时（15s）前快速失败，实际 " + stopwatch.ElapsedMilliseconds + " ms");
+            Assert(failure.Message.Contains("中转进程已退出"),
+                "快速失败消息应说明中转进程已退出：" + failure.Message);
+            Assert(failure.Message.Contains("错误码"), "快速失败消息应带出 runner 的退出码：" + failure.Message);
+            Assert(failure.Message.Contains("未能连接管道"),
+                "快速失败消息应说明未能连接管道：" + failure.Message);
+            Notice("Runner_DeadRelayFailsFast：runner 立即退出后 " + stopwatch.ElapsedMilliseconds
+                   + " ms 内失败：" + failure.Message);
+        }
+
+        /// <summary>
+        /// 评审 IMPORTANT 3 的回归用例：每个中转会话都必须能报告 runner 的真实身份与子进程基础环境来源。
+        /// 同权限路径的身份就是当前用户；三种基础环境文案逐字固定（设计决策 13 / §6.4）。
+        /// </summary>
+        private static void RunnerIdentityAndBaseEnvironmentAreReported()
+        {
+            AssertEqual("继承自提权令牌", RunnerSession.DescribeBaseEnvironment(RunnerLaunchMode.Elevated));
+            AssertEqual("继承自标准用户令牌", RunnerSession.DescribeBaseEnvironment(RunnerLaunchMode.StandardUser));
+            AssertEqual("继承自当前进程", RunnerSession.DescribeBaseEnvironment(RunnerLaunchMode.SameIntegrity));
+
+            string runnerPath = RunnerPath();
+            Assert(File.Exists(runnerPath), "找不到中转进程：" + runnerPath + "（请先构建解决方案）");
+
+            var request = new LaunchRequest
+            {
+                FileName = CmdPath(),
+                Arguments = "/d /s /c \"echo identity\"",
+                WorkingDirectory = Path.GetTempPath(),
+                Kind = ChildKind.Executable,
+                EnvOverrides = EmptyEnv()
+            };
+
+            RunnerSession session = null;
+            var exitReceived = new ManualResetEventSlim(false);
+            try
+            {
+                session = RunnerSession.StartAsync(request, RunnerLaunchMode.SameIntegrity, runnerPath,
+                    Common.GetApplicationPath(), CancellationToken.None).GetAwaiter().GetResult();
+                session.Exited += _ => exitReceived.Set();
+
+                using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+                {
+                    // 身份必须真的是账号名，不能悄悄回落到“无法读取身份”兜底（IMPORTANT 3 的回归点）。
+                    Assert(!string.Equals(RunnerSession.UnknownRunnerIdentity, session.RunnerIdentity,
+                        StringComparison.Ordinal), "中转身份不能回落到“无法读取身份”兜底：" + session.RunnerIdentity);
+                    Assert(string.Equals(identity.Name, session.RunnerIdentity, StringComparison.OrdinalIgnoreCase),
+                        "同权限 runner 的身份应等于当前用户（" + identity.Name + "），实际：" + session.RunnerIdentity);
+                }
+
+                AssertEqual("继承自当前进程", session.BaseEnvironmentSource);
+                Assert(exitReceived.Wait(RunnerWaitTimeoutMs), "identity 用例的子进程应在限定时间内结束");
+                // 与 ProcessManager 写进每项日志的内容逐字同形，便于在 selftest.log 里直接核对真实账号。
+                Notice("中转进程身份：" + session.RunnerIdentity
+                       + "；子进程基础环境：" + session.BaseEnvironmentSource + "。");
+            }
+            finally
+            {
+                if (session != null)
+                {
+                    session.Dispose();
+                }
+
+                exitReceived.Dispose();
             }
         }
 
