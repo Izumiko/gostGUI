@@ -1,0 +1,216 @@
+// =====================================================================================
+// FormMain.Tray.cs —— 托盘与退出：通知图标、还原并抢前台、托盘菜单、关闭即隐藏、真退出。
+// 本文件是 FormMain 的 partial，成员从 FormMain.cs 原样搬来（签名/可见性/行为未改）。
+// =====================================================================================
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using gostGUI.Native;
+using gostGUI.Shared;
+using Microsoft.Win32;
+
+namespace gostGUI
+{
+    public partial class FormMain : Form
+    {
+        /// <summary>走与真实窗口关闭完全相同的事件处理器（UserClosing → 提交 + 隐藏）。</summary>
+        internal void TriggerFormClosingForTest()
+        {
+            FormMain_FormClosing(this, new FormClosingEventArgs(CloseReason.UserClosing, false));
+        }
+
+        /// <summary>走与托盘“退出”完全相同的退出前提交路径（不真的 Application.Exit）。</summary>
+        internal void CommitPendingEditsForTest()
+        {
+            CommitPendingDetailEdits();
+        }
+
+        // =====================================================================================
+        // 托盘与退出
+        // =====================================================================================
+
+        private void NotifyIcon_MouseClick(object sender, MouseEventArgs e)
+        {
+            // 右键菜单由 NotifyIcon.ContextMenuStrip 自己弹出（只挂一处，避免重复弹两次菜单）；
+            // 这里只处理“左键单击还原窗口”。
+            if (e.Button == MouseButtons.Left)
+            {
+                RestoreAndBringToFront();
+            }
+        }
+
+        private void NotifyIcon_DoubleClick(object sender, EventArgs e)
+        {
+            RestoreAndBringToFront();
+        }
+
+        /// <summary>还原窗口并抢到前台：保留 v1.8 的 TopMost + Alt 击键方案（v1.9 用 SendInput 实现）。</summary>
+        private void RestoreAndBringToFront()
+        {
+            if (!Visible)
+            {
+                Visible = true;
+            }
+
+            ShowInTaskbar = true;
+
+            if (WindowState == FormWindowState.Minimized)
+            {
+                WindowState = FormWindowState.Normal;
+            }
+
+            NativeMethods.ShowWindow(Handle, SwRestore);
+
+            // 未最小化但被遮挡时，用 TopMost 快速置顶再还原，确保冲破遮挡。
+            TopMost = true;
+            BringToFront();
+            Activate();
+            TopMost = false;
+
+            // 模拟一次 Alt 击键以取得 SetForegroundWindow 的前台切换权限（避免 AttachThreadInput 跨线程死锁）。
+            INPUT[] inputs = NativeMethods.BuildAltKeyInputs();
+            NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+            NativeMethods.SetForegroundWindow(Handle);
+        }
+
+        /// <summary>关闭窗口 = 隐藏到托盘；真正退出只有托盘/按钮的“退出”。</summary>
+        private void FormMain_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            // 窗口可能在最后一次失焦之前就被关闭：先把详情编辑器里待提交的字段落盘。
+            CommitPendingDetailEdits();
+
+            if (_isExiting)
+            {
+                // 正常退出路径已经在 ExitApplication 里保存过；这里只兜底一次。
+                if (!_exitWindowStateAttempted)
+                {
+                    _exitWindowStateAttempted = true;
+                    PersistWindowState(true);
+                }
+
+                return;
+            }
+
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                // 隐藏到托盘前记住窗口几何；应用还会继续跑，失败用气泡提示。
+                PersistWindowState(false);
+                e.Cancel = true;
+                ShowInTaskbar = false;
+                Hide();
+                return;
+            }
+
+            // 系统关机/任务管理器等：保存但不阻塞关机。
+            _exitWindowStateAttempted = true;
+            PersistWindowState(false);
+        }
+
+        private void FormMain_FormClosed(object sender, FormClosedEventArgs e)
+        {
+            _isExiting = true;
+            DisposeProcessManagerQuietly();
+        }
+
+        private void OnApplicationExit(object sender, EventArgs e)
+        {
+            _isExiting = true;
+            DisposeProcessManagerQuietly();
+        }
+
+        /// <summary>
+        /// 真退出：先停掉所有进程（可能阻塞，放线程池），再关 Job、关托盘、Application.Exit。
+        /// _isExiting 语义保留：退出过程中的 ProcessExited/Stopped 不再回写 Enable。
+        /// </summary>
+        private void ExitApplication()
+        {
+            if (_exitRequested)
+            {
+                return;
+            }
+
+            // 托盘/按钮“退出”同样可能发生在最后一次失焦之前：在置 _isExiting 之前提交。
+            CommitPendingDetailEdits();
+
+            // 先置 _exitRequested：退出前的保存可能弹出模态框，模态框会泵消息，
+            // 第二次“退出”点击必须被这里挡住，不能重复停进程/Application.Exit。
+            _exitRequested = true;
+
+            // 退出前把窗口状态落盘；失败必须显形，不能把刚提交的编辑静默丢掉。
+            if (!_exitWindowStateAttempted)
+            {
+                _exitWindowStateAttempted = true;
+                PersistWindowState(true);
+            }
+
+            _isExiting = true;
+
+            if (_notifyIcon != null)
+            {
+                _notifyIcon.Visible = false;
+            }
+
+            ProcessManager manager = _processManager;
+            Task.Run(() =>
+            {
+                try
+                {
+                    manager?.StopAllProcesses();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine("退出时停止进程失败：" + ex.Message);
+                }
+
+                DisposeProcessManagerQuietly();
+
+                Action exitAction = () =>
+                {
+                    try
+                    {
+                        _notifyIcon?.Dispose();
+                    }
+                    catch (Exception)
+                    {
+                        // 托盘图标已经释放过就忽略。
+                    }
+
+                    Application.Exit();
+                };
+
+                // 正常路径：回到 UI 线程退出；UI 线程已经不可投递（窗体和句柄都没了）时
+                // 直接执行退出动作，绝不留下“没有界面但进程还在”的僵尸。
+                if (!TryPostUi(exitAction))
+                {
+                    try
+                    {
+                        exitAction();
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine("兜底退出失败：" + ex.Message);
+                        try
+                        {
+                            Application.Exit();
+                        }
+                        catch (Exception)
+                        {
+                            // 走到这里只能交给进程自然结束。
+                        }
+                    }
+                }
+            });
+        }
+
+        private const int SwRestore = 9;
+    }
+}
