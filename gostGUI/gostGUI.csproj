@@ -75,6 +75,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Common.cs" />
+    <Compile Include="WindowGeometry.cs" />
     <Compile Include="LogKind.cs" />
     <Compile Include="SelfTest.cs" />
     <Compile Include="ProgramResolver.cs" />
@@ -83,6 +84,8 @@
     <Compile Include="Theme\Palette.cs" />
     <Compile Include="Theme\IThemed.cs" />
     <Compile Include="Theme\ThemeManager.cs" />
+    <Compile Include="Theme\ThemeText.cs" />
+    <Compile Include="Theme\WindowTheme.cs" />
     <Compile Include="Theme\FlatButton.cs" />
     <Compile Include="Theme\CardPanel.cs" />
     <Compile Include="Theme\ToggleSwitch.cs" />

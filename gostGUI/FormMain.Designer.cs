@@ -138,10 +138,16 @@ namespace gostGUI
         private void InitializeComponent()
         {
             int dpi = ResolveStartupDpi();
+            _layoutDpi = dpi;
             int Dip(int value)
             {
                 return (int)Math.Round(value * dpi / 96.0, MidpointRounding.AwayFromZero);
             }
+
+            // 自检/截图的 DPI 覆盖：字体也按同一比例放大，才能在与 96 DPI 相同的绘制上下文里
+            // 得到真实 120/144 DPI 的像素结果。生产路径 fontScale=1，字体保持固定点数，
+            // 由 GDI 按显示器 DPI 渲染。
+            float fontScale = StartupDpiOverride > 0 ? dpi / 96f : 1f;
 
             this.components = new System.ComponentModel.Container();
             this.SuspendLayout();
@@ -157,11 +163,11 @@ namespace gostGUI
             this.BackColor = Palette.Light.Surface;
             this.ForeColor = Palette.Light.TextPrimary;
 
-            _baseFont = CreateBaseFont();
+            _baseFont = CreateBaseFont(9f * fontScale);
             this.Font = _baseFont;
-            _titleFont = new Font(_baseFont.FontFamily, 12f, FontStyle.Bold, GraphicsUnit.Point);
-            _sectionFont = new Font(_baseFont.FontFamily, 10f, FontStyle.Bold, GraphicsUnit.Point);
-            _monoFont = CreateMonoFont(9.5f);
+            _titleFont = new Font(_baseFont.FontFamily, 12f * fontScale, FontStyle.Bold, GraphicsUnit.Point);
+            _sectionFont = new Font(_baseFont.FontFamily, 10f * fontScale, FontStyle.Bold, GraphicsUnit.Point);
+            _monoFont = CreateMonoFont(9.5f * fontScale);
             _appIcon = LoadApplicationIcon();
             if (_appIcon != null)
             {

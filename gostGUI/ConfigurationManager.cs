@@ -41,6 +41,43 @@ namespace gostGUI
         /// <summary>全局 UI 主题（跟随系统 / 浅色 / 深色）。</summary>
         public ThemeMode Theme => _configData.Theme;
 
+        /// <summary>窗口大小/位置/最大化状态（DIP）；始终返回非 null 对象。</summary>
+        public ConfigWindow WindowState
+        {
+            get
+            {
+                if (_configData.Window == null)
+                {
+                    _configData.Window = new ConfigWindow();
+                }
+
+                return _configData.Window;
+            }
+            set
+            {
+                if (value != null)
+                {
+                    _configData.Window = value;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 写入窗口状态并立即落盘。返回是否保存成功；失败原因见 <see cref="SaveError"/>
+        /// （退出路径据此给出可见提示，而不是静默丢掉刚提交的修改）。
+        /// 调用方负责按当前工作区/DPI 规范化几何（FormMain.CaptureWindowState）。
+        /// </summary>
+        public bool SaveWindowState(ConfigWindow state)
+        {
+            if (state == null)
+            {
+                return false;
+            }
+
+            WindowState = state;
+            return Save();
+        }
+
         /// <summary>保存失败时把中文原因抛给界面层（横幅 / 弹框），绝不静默吞掉。</summary>
         public event Action<string> SaveFailed;
 

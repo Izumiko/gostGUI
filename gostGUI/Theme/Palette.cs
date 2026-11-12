@@ -145,11 +145,21 @@ namespace gostGUI
     {
         public const int BaselineDpi = 96;
 
+        /// <summary>
+        /// 自检/截图用的 DPI 覆盖：非 0 时所有自绘尺寸按该 DPI 缩放。
+        /// 生产路径始终是 0，按控件真实 DeviceDpi 缩放。
+        /// </summary>
+        internal static int DpiOverride { get; set; }
+
         /// <summary>把 96 DPI 下的逻辑像素换算成当前控件的设备像素。</summary>
         public static int Scale(Control control, int value)
         {
             float dpi = BaselineDpi;
-            if (control != null)
+            if (DpiOverride > 0)
+            {
+                dpi = DpiOverride;
+            }
+            else if (control != null)
             {
                 try
                 {

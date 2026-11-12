@@ -41,7 +41,14 @@ namespace gostGUI
             _palette = palette;
             BackColor = ResolveSurfaceColor();
             ForeColor = palette.TextPrimary;
+            WindowTheme.ApplyScrollbars(this, ReferenceEquals(palette, Palette.Dark));
             Invalidate();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            WindowTheme.ApplyScrollbars(this, ReferenceEquals(_palette, Palette.Dark));
         }
 
         protected override void OnParentChanged(EventArgs e)
@@ -128,7 +135,7 @@ namespace gostGUI
             int statusWidth = 0;
             if (!string.IsNullOrEmpty(statusText))
             {
-                Size statusSize = TextRenderer.MeasureText(statusText, Font);
+                Size statusSize = ThemeText.Measure(statusText, Font);
                 statusWidth = Math.Min(
                     statusSize.Width + ThemePaint.Scale(this, 2),
                     Math.Max(1, bounds.Width / 3));
@@ -209,3 +216,4 @@ namespace gostGUI
         }
     }
 }
+

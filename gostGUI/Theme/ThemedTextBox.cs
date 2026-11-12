@@ -37,6 +37,8 @@ namespace gostGUI
             _inner.GotFocus += InnerGotFocus;
             _inner.LostFocus += InnerLostFocus;
             _inner.TextChanged += InnerTextChanged;
+            _inner.HandleCreated += (sender, args) =>
+                WindowTheme.ApplyScrollbars(_inner, ReferenceEquals(_palette, Palette.Dark));
             Controls.Add(_inner);
 
             ApplyTheme(_palette);
@@ -88,6 +90,7 @@ namespace gostGUI
                 }
 
                 _inner.ScrollBars = value;
+                WindowTheme.ApplyScrollbars(_inner, ReferenceEquals(_palette, Palette.Dark));
                 LayoutInner();
                 Invalidate();
             }
@@ -105,6 +108,7 @@ namespace gostGUI
             ForeColor = palette.TextPrimary;
             _inner.BackColor = palette.SurfaceAlt;
             _inner.ForeColor = palette.TextPrimary;
+            WindowTheme.ApplyScrollbars(_inner, ReferenceEquals(palette, Palette.Dark));
             Invalidate();
         }
 

@@ -70,7 +70,7 @@ namespace gostGUI
             int trackHeight = ThemePaint.Scale(this, 20);
             string text = Text ?? string.Empty;
             int gap = text.Length == 0 ? 0 : ThemePaint.Scale(this, 8);
-            Size textSize = text.Length == 0 ? Size.Empty : TextRenderer.MeasureText(text, Font);
+            Size textSize = text.Length == 0 ? Size.Empty : ThemeText.Measure(text, Font);
             int width = trackWidth + gap + textSize.Width + ThemePaint.Scale(this, 2);
             int height = Math.Max(trackHeight, textSize.Height);
             return new Size(Math.Max(1, width), Math.Max(1, height));
@@ -255,3 +255,4 @@ namespace gostGUI
         }
     }
 }
+

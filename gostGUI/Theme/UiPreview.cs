@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -45,6 +46,9 @@ namespace gostGUI
                 string lightPath = Path.Combine(fullDirectory, "preview-light.png");
                 string darkPath = Path.Combine(fullDirectory, "preview-dark.png");
 
+                // 预览场景的坐标是 96 DPI 设计基线，必须让自绘尺寸也按 96 DPI 计算，
+                // 否则 200% 缩放的机器上会出现控件/尺寸翻倍后互相挤压。
+                using (new PreviewDpiScope())
                 using (var scene = new PreviewScene())
                 {
                     scene.Apply(Palette.Light);
@@ -123,6 +127,60 @@ namespace gostGUI
             {
                 // 同上。
             }
+        }
+
+        /// <summary>
+        /// 临时把绘制上下文固定回 96 DPI 设计基线（线程 DPI 上下文 + 自绘尺寸覆盖），
+        /// 离开作用域时恢复。这样 200% 缩放的机器上预览仍与 1024×640 DIP 的设计稿一致。
+        /// </summary>
+        private sealed class PreviewDpiScope : IDisposable
+        {
+            private const int DpiAwarenessContextUnaware = -1;
+
+            private readonly int _previous;
+            private readonly IntPtr _previousContext;
+            private readonly bool _contextApplied;
+
+            public PreviewDpiScope()
+            {
+                _previous = ThemePaint.DpiOverride;
+                ThemePaint.DpiOverride = ThemePaint.BaselineDpi;
+
+                try
+                {
+                    _previousContext = GetThreadDpiAwarenessContext();
+                    _contextApplied = SetThreadDpiAwarenessContext(new IntPtr(DpiAwarenessContextUnaware));
+                }
+                catch (Exception)
+                {
+                    _contextApplied = false;
+                }
+            }
+
+            public void Dispose()
+            {
+                ThemePaint.DpiOverride = _previous;
+
+                if (!_contextApplied)
+                {
+                    return;
+                }
+
+                try
+                {
+                    SetThreadDpiAwarenessContext(_previousContext);
+                }
+                catch (Exception)
+                {
+                    // 恢复失败没有可补救的动作。
+                }
+            }
+
+            [DllImport("user32.dll")]
+            private static extern IntPtr GetThreadDpiAwarenessContext();
+
+            [DllImport("user32.dll")]
+            private static extern bool SetThreadDpiAwarenessContext(IntPtr dpiContext);
         }
 
         /// <summary>预览场景：创建一个不显示的 900×640 窗体，放入每种主题控件的代表状态。</summary>

@@ -45,6 +45,28 @@ namespace gostGUI
             get { return _current; }
         }
 
+        /// <summary>
+        /// “跟随系统”模式下重新读取系统偏好。只有解析出的调色板真的变了才触发 Changed；
+        /// WM_SETTINGCHANGE 可能因为任意系统设置变化而到达，不能每次都重铺整棵树。
+        /// </summary>
+        public bool RefreshSystemPreference()
+        {
+            if (_mode != ThemeMode.System)
+            {
+                return false;
+            }
+
+            Palette resolved = ResolvePalette();
+            if (ReferenceEquals(resolved, _current))
+            {
+                return false;
+            }
+
+            _current = resolved;
+            Changed?.Invoke();
+            return true;
+        }
+
         /// <summary>主题变化通知；订阅者负责对自己的窗口调用 ApplyTo。</summary>
         public event Action Changed;
 
@@ -111,10 +133,9 @@ namespace gostGUI
         }
 
         /// <summary>
-        /// 让系统标题栏跟随深色（Win10 1809+ 的 DWMWA_USE_IMMERSIVE_DARK_MODE=20）。
-        /// 老系统返回失败码也无妨，这里静默忽略。
+        /// 设置标题栏深色/浅色。切回浅色时必须显式写 0，否则标题栏会一直停在上次的深色状态。
         /// </summary>
-        public static void ApplyDarkTitleBar(Form form)
+        public static void ApplyDarkTitleBar(Form form, bool dark)
         {
             if (form == null)
             {
@@ -129,7 +150,7 @@ namespace gostGUI
                     return;
                 }
 
-                int enabled = 1;
+                int enabled = dark ? 1 : 0;
                 DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int));
             }
             catch (Exception)

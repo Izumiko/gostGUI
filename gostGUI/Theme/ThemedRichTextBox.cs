@@ -38,6 +38,8 @@ namespace gostGUI
                 Dock = DockStyle.Fill
             };
             _inner.TextChanged += InnerTextChanged;
+            _inner.HandleCreated += (sender, args) =>
+                WindowTheme.ApplyScrollbars(_inner, ReferenceEquals(_palette, Palette.Dark));
             Controls.Add(_inner);
 
             ApplyTheme(_palette);
@@ -65,6 +67,7 @@ namespace gostGUI
             BackColor = palette.LogBg;
             ForeColor = palette.LogStdout;
             _inner.BackColor = palette.LogBg;
+            WindowTheme.ApplyScrollbars(_inner, ReferenceEquals(palette, Palette.Dark));
 
             // 已有 run 的 SelectionColor 是权威颜色：主题切换时不能重设 ForeColor，
             // 否则 RichTextBox 会把所有 run 压成同一种颜色。空日志才需要写入主题默认色；

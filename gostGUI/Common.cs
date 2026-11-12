@@ -89,14 +89,23 @@ public class ConfigWindow
     [JsonPropertyName("max")]
     public bool Max { get; set; }
 
-    /// <summary>加载后校正越界尺寸：过小或非正数一律回落到默认宽高。</summary>
+    /// <summary>捕获该几何时的窗口 DPI；旧配置没有该字段时按 96 处理。</summary>
+    [JsonPropertyName("dpi")]
+    public int Dpi { get; set; } = 96;
+
+    /// <summary>
+    /// 加载时的绝对下限：只拒绝无法使用的尺寸。真正的设计下限（880×560，按工作区放宽）
+    /// 由 FormMain 在恢复/捕获时用 WindowGeometry.MinimumDipFor 计算。
+    /// </summary>
     internal void Normalize()
     {
-        if (W < 640 || H < 480)
+        if (W < 1 || H < 1 || W > WindowGeometry.MaxSize || H > WindowGeometry.MaxSize)
         {
             W = DefaultWidth;
             H = DefaultHeight;
         }
+
+        Dpi = WindowGeometry.NormalizeDpi(Dpi);
     }
 }
 
