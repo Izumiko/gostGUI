@@ -1,6 +1,6 @@
 using System;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using gostGUI.Native;
 using Microsoft.Win32;
 
 namespace gostGUI
@@ -151,7 +151,7 @@ namespace gostGUI
                 }
 
                 int enabled = dark ? 1 : 0;
-                DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int));
+                NativeMethods.DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int));
             }
             catch (Exception)
             {
@@ -173,12 +173,5 @@ namespace gostGUI
                     return prefersDark ? Palette.Dark : Palette.Light;
             }
         }
-
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmSetWindowAttribute(
-            IntPtr hwnd,
-            int attribute,
-            ref int attributeValue,
-            int attributeSize);
     }
 }

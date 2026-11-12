@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 
 namespace gostGUI
 {
@@ -315,13 +314,6 @@ namespace gostGUI
             Save();
             ItemRenamed?.Invoke(item, newName);
             return true;
-        }
-
-        /// <summary>兼容旧签名：不返回原因（界面层请改用带 out error 的重载）。</summary>
-        public bool RenameItem(ConfigItem item, string newName)
-        {
-            string error;
-            return RenameItem(item, newName, out error);
         }
 
         public void UpdateItemProgram(ConfigItem item, string programPath)

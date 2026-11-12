@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using gostGUI.Native;
 
 namespace gostGUI
 {
@@ -95,7 +96,7 @@ namespace gostGUI
             IntPtr buffer = IntPtr.Zero;
             try
             {
-                if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out token))
+                if (!NativeMethods.OpenProcessToken(NativeMethods.GetCurrentProcess(), TokenQuery, out token))
                 {
                     throw CannotDetermineElevation("打开当前进程令牌失败", Marshal.GetLastWin32Error());
                 }
@@ -103,7 +104,7 @@ namespace gostGUI
                 int size = Marshal.SizeOf(typeof(TokenElevation));
                 buffer = Marshal.AllocHGlobal(size);
                 uint returned;
-                if (!GetTokenInformation(token, TokenElevationClass, buffer, (uint)size, out returned))
+                if (!NativeMethods.GetTokenInformation(token, TokenElevationClass, buffer, (uint)size, out returned))
                 {
                     throw CannotDetermineElevation("读取 TokenElevation 失败", Marshal.GetLastWin32Error());
                 }
@@ -120,7 +121,7 @@ namespace gostGUI
 
                 if (token != IntPtr.Zero)
                 {
-                    CloseHandle(token);
+                    NativeMethods.CloseHandle(token);
                 }
             }
         }
@@ -214,7 +215,7 @@ namespace gostGUI
             IntPtr processHandle = IntPtr.Zero;
             try
             {
-                if (!ShellExecuteEx(ref info))
+                if (!NativeMethods.ShellExecuteEx(ref info))
                 {
                     // 1223 就是 UAC 取消，必须原样上抛错误码，由调用方映射成中文。
                     throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -226,7 +227,7 @@ namespace gostGUI
                     throw new InvalidOperationException("ShellExecuteEx 成功但未返回中转进程句柄。");
                 }
 
-                uint processId = GetProcessId(processHandle);
+                uint processId = NativeMethods.GetProcessId(processHandle);
                 if (processId == 0)
                 {
                     throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -251,7 +252,7 @@ namespace gostGUI
                 // 返回值是 Process.GetProcessById 重新打开的对象，不依赖这个原句柄。
                 if (info.hProcess != IntPtr.Zero)
                 {
-                    CloseHandle(info.hProcess);
+                    NativeMethods.CloseHandle(info.hProcess);
                 }
             }
         }
@@ -298,14 +299,14 @@ namespace gostGUI
                         "找不到当前会话的标准权限 explorer.exe 进程，无法降权启动；请改用标准权限运行 gostGUI");
                 }
 
-                explorerProcess = OpenProcess(ProcessQueryLimitedInformation, false, explorer.Id);
+                explorerProcess = NativeMethods.OpenProcess(ProcessQueryLimitedInformation, false, explorer.Id);
                 if (explorerProcess == IntPtr.Zero)
                 {
                     throw NativeFailure(Marshal.GetLastWin32Error(),
                         "打开 explorer.exe 进程失败，无法降权启动；请改用标准权限运行 gostGUI");
                 }
 
-                if (!OpenProcessToken(explorerProcess, TokenQuery | TokenDuplicate, out explorerToken))
+                if (!NativeMethods.OpenProcessToken(explorerProcess, TokenQuery | TokenDuplicate, out explorerToken))
                 {
                     throw NativeFailure(Marshal.GetLastWin32Error(),
                         "打开 explorer.exe 的令牌失败，无法降权启动；请改用标准权限运行 gostGUI");
@@ -326,7 +327,7 @@ namespace gostGUI
                         "explorer.exe 的令牌本身就是管理员权限，没有可借的标准用户令牌；请改用标准权限运行 gostGUI");
                 }
 
-                if (!DuplicateTokenEx(explorerToken, TokenAllAccess, IntPtr.Zero, SecurityImpersonation,
+                if (!NativeMethods.DuplicateTokenEx(explorerToken, TokenAllAccess, IntPtr.Zero, SecurityImpersonation,
                         TokenPrimary, out primaryToken))
                 {
                     throw NativeFailure(Marshal.GetLastWin32Error(), "复制 explorer.exe 的主令牌失败，无法降权启动");
@@ -485,7 +486,7 @@ namespace gostGUI
             bool modeChanged = SuppressHardErrorDialogs(out previousErrorMode);
             try
             {
-                bool created = CreateProcessWithTokenW(token, 0, runnerPath, commandLine, 0, IntPtr.Zero,
+                bool created = NativeMethods.CreateProcessWithTokenW(token, 0, runnerPath, commandLine, 0, IntPtr.Zero,
                     workingDirectory, ref startup, out started);
                 errorCode = created ? 0 : Marshal.GetLastWin32Error();
                 return created;
@@ -510,7 +511,7 @@ namespace gostGUI
             bool modeChanged = SuppressHardErrorDialogs(out previousErrorMode);
             try
             {
-                bool created = CreateProcessAsUser(token, runnerPath, commandLine, IntPtr.Zero, IntPtr.Zero, false,
+                bool created = NativeMethods.CreateProcessAsUser(token, runnerPath, commandLine, IntPtr.Zero, IntPtr.Zero, false,
                     0, IntPtr.Zero, workingDirectory, ref startup, out started);
                 errorCode = created ? 0 : Marshal.GetLastWin32Error();
                 return created;
@@ -535,7 +536,7 @@ namespace gostGUI
             previousErrorMode = 0;
             try
             {
-                return SetThreadErrorMode(SemFailCriticalErrors | SemNoOpenFileErrorBox, out previousErrorMode);
+                return NativeMethods.SetThreadErrorMode(SemFailCriticalErrors | SemNoOpenFileErrorBox, out previousErrorMode);
             }
             catch (Exception)
             {
@@ -555,7 +556,7 @@ namespace gostGUI
             try
             {
                 uint ignored;
-                SetThreadErrorMode(previousErrorMode, out ignored);
+                NativeMethods.SetThreadErrorMode(previousErrorMode, out ignored);
             }
             catch (Exception)
             {
@@ -604,7 +605,7 @@ namespace gostGUI
             bool allEnabled = true;
             try
             {
-                if (!OpenProcessToken(GetCurrentProcess(), TokenAdjustPrivileges | TokenQuery, out token))
+                if (!NativeMethods.OpenProcessToken(NativeMethods.GetCurrentProcess(), TokenAdjustPrivileges | TokenQuery, out token))
                 {
                     privilegeError = "打开当前进程令牌失败（Windows 错误码 " + Marshal.GetLastWin32Error() + "）";
                     return false;
@@ -618,7 +619,7 @@ namespace gostGUI
                     }
 
                     long luid;
-                    if (!LookupPrivilegeValue(null, name, out luid))
+                    if (!NativeMethods.LookupPrivilegeValue(null, name, out luid))
                     {
                         privilegeError = "找不到特权 " + name + "（Windows 错误码 "
                                          + Marshal.GetLastWin32Error() + "）";
@@ -638,7 +639,7 @@ namespace gostGUI
                     IntPtr previousBuffer = Marshal.AllocHGlobal(stateSize);
                     try
                     {
-                        bool adjusted = AdjustTokenPrivileges(token, false, ref newState, (uint)stateSize,
+                        bool adjusted = NativeMethods.AdjustTokenPrivileges(token, false, ref newState, (uint)stateSize,
                             previousBuffer, IntPtr.Zero);
                         int lastError = Marshal.GetLastWin32Error();
                         if (!adjusted)
@@ -707,7 +708,7 @@ namespace gostGUI
 
                 try
                 {
-                    AdjustTokenPrivileges(token, false, ref state,
+                    NativeMethods.AdjustTokenPrivileges(token, false, ref state,
                         (uint)Marshal.SizeOf(typeof(TokenPrivileges)), IntPtr.Zero, IntPtr.Zero);
                 }
                 catch (Exception)
@@ -761,7 +762,7 @@ namespace gostGUI
             try
             {
                 uint returned;
-                if (!GetTokenInformation(token, TokenElevationClass, buffer, (uint)size, out returned))
+                if (!NativeMethods.GetTokenInformation(token, TokenElevationClass, buffer, (uint)size, out returned))
                 {
                     return Marshal.GetLastWin32Error();
                 }
@@ -787,155 +788,9 @@ namespace gostGUI
         {
             if (handle != IntPtr.Zero)
             {
-                CloseHandle(handle);
+                NativeMethods.CloseHandle(handle);
             }
         }
 
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct ShellExecuteInfo
-        {
-            public int cbSize;
-            public uint fMask;
-            public IntPtr hwnd;
-
-            [MarshalAs(UnmanagedType.LPWStr)]
-            public string lpVerb;
-
-            [MarshalAs(UnmanagedType.LPWStr)]
-            public string lpFile;
-
-            [MarshalAs(UnmanagedType.LPWStr)]
-            public string lpParameters;
-
-            [MarshalAs(UnmanagedType.LPWStr)]
-            public string lpDirectory;
-
-            public int nShow;
-            public IntPtr hInstApp;
-            public IntPtr lpIDList;
-
-            [MarshalAs(UnmanagedType.LPWStr)]
-            public string lpClass;
-
-            public IntPtr hkeyClass;
-            public uint dwHotKey;
-            public IntPtr hIconOrMonitor;
-            public IntPtr hProcess;
-        }
-
-        /// <summary>STARTUPINFO（Unicode）。字符指针字段靠 CharSet.Unicode 逐个按 LPWSTR 封送。</summary>
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct StartupInfo
-        {
-            public int cb;
-
-            [MarshalAs(UnmanagedType.LPWStr)]
-            public string lpReserved;
-
-            [MarshalAs(UnmanagedType.LPWStr)]
-            public string lpDesktop;
-
-            [MarshalAs(UnmanagedType.LPWStr)]
-            public string lpTitle;
-
-            public int dwX;
-            public int dwY;
-            public int dwXSize;
-            public int dwYSize;
-            public int dwXCountChars;
-            public int dwYCountChars;
-            public int dwFillAttribute;
-            public int dwFlags;
-            public short wShowWindow;
-            public short cbReserved2;
-            public IntPtr lpReserved2;
-            public IntPtr hStdInput;
-            public IntPtr hStdOutput;
-            public IntPtr hStdError;
-        }
-
-        /// <summary>PROCESS_INFORMATION。</summary>
-        [StructLayout(LayoutKind.Sequential)]
-        private struct ProcessInfo
-        {
-            public IntPtr Process;
-            public IntPtr Thread;
-            public int ProcessId;
-            public int ThreadId;
-        }
-
-        /// <summary>TOKEN_PRIVILEGES（一元素版本）。LUID 是 8 字节，必须按 4 字节对齐打包。</summary>
-        [StructLayout(LayoutKind.Sequential, Pack = 4)]
-        private struct TokenPrivileges
-        {
-            public int PrivilegeCount;
-            public long Luid;
-            public uint Attributes;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct TokenElevation
-        {
-            public int TokenIsElevated;
-        }
-
-        [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "ShellExecuteExW")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool ShellExecuteEx(ref ShellExecuteInfo executeInfo);
-
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr GetCurrentProcess();
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern uint GetProcessId(IntPtr process);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CloseHandle(IntPtr handle);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr OpenProcess(uint desiredAccess,
-            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, int processId);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetThreadErrorMode(uint newMode, out uint oldMode);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out IntPtr token);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetTokenInformation(IntPtr token, int informationClass, IntPtr information,
-            uint informationLength, out uint returnLength);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DuplicateTokenEx(IntPtr existingToken, uint desiredAccess,
-            IntPtr tokenAttributes, int impersonationLevel, int tokenType, out IntPtr newToken);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool LookupPrivilegeValue(string systemName, string name, out long luid);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AdjustTokenPrivileges(IntPtr token,
-            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges, ref TokenPrivileges newState,
-            uint bufferLength, IntPtr previousState, IntPtr returnLength);
-
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CreateProcessWithTokenW(IntPtr token, uint logonFlags,
-            string applicationName, StringBuilder commandLine, uint creationFlags, IntPtr environment,
-            string currentDirectory, ref StartupInfo startupInfo, out ProcessInfo processInformation);
-
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CreateProcessAsUser(IntPtr token, string applicationName,
-            StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes,
-            [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint creationFlags, IntPtr environment,
-            string currentDirectory, ref StartupInfo startupInfo, out ProcessInfo processInformation);
     }
 }

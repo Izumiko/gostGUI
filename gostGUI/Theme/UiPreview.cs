@@ -1,11 +1,10 @@
 using System;
-using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using gostGUI.Native;
 
 namespace gostGUI
 {
@@ -148,8 +147,8 @@ namespace gostGUI
 
                 try
                 {
-                    _previousContext = GetThreadDpiAwarenessContext();
-                    _contextApplied = SetThreadDpiAwarenessContext(new IntPtr(DpiAwarenessContextUnaware));
+                    _previousContext = NativeMethods.GetThreadDpiAwarenessContext();
+                    _contextApplied = NativeMethods.SetThreadDpiAwarenessContext(new IntPtr(DpiAwarenessContextUnaware));
                 }
                 catch (Exception)
                 {
@@ -168,19 +167,13 @@ namespace gostGUI
 
                 try
                 {
-                    SetThreadDpiAwarenessContext(_previousContext);
+                    NativeMethods.SetThreadDpiAwarenessContext(_previousContext);
                 }
                 catch (Exception)
                 {
                     // 恢复失败没有可补救的动作。
                 }
             }
-
-            [DllImport("user32.dll")]
-            private static extern IntPtr GetThreadDpiAwarenessContext();
-
-            [DllImport("user32.dll")]
-            private static extern bool SetThreadDpiAwarenessContext(IntPtr dpiContext);
         }
 
         /// <summary>预览场景：创建一个不显示的 900×640 窗体，放入每种主题控件的代表状态。</summary>

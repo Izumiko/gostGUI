@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using gostGUI.Native;
 using gostGUI.Shared;
 using Microsoft.Win32;
 
@@ -2727,7 +2728,7 @@ namespace gostGUI
             RestoreAndBringToFront();
         }
 
-        /// <summary>还原窗口并抢到前台：保留 v1.8 的 TopMost + Alt 击键方案（SendInput 属阶段二）。</summary>
+        /// <summary>还原窗口并抢到前台：保留 v1.8 的 TopMost + Alt 击键方案（v1.9 用 SendInput 实现）。</summary>
         private void RestoreAndBringToFront()
         {
             if (!Visible)
@@ -2742,7 +2743,7 @@ namespace gostGUI
                 WindowState = FormWindowState.Normal;
             }
 
-            ShowWindow(Handle, SwRestore);
+            NativeMethods.ShowWindow(Handle, SwRestore);
 
             // 未最小化但被遮挡时，用 TopMost 快速置顶再还原，确保冲破遮挡。
             TopMost = true;
@@ -2751,9 +2752,9 @@ namespace gostGUI
             TopMost = false;
 
             // 模拟一次 Alt 击键以取得 SetForegroundWindow 的前台切换权限（避免 AttachThreadInput 跨线程死锁）。
-            keybd_event(VkMenu, 0, 0, 0);
-            keybd_event(VkMenu, 0, KeyeventfKeyUp, 0);
-            SetForegroundWindow(Handle);
+            INPUT[] inputs = NativeMethods.BuildAltKeyInputs();
+            NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+            NativeMethods.SetForegroundWindow(Handle);
         }
 
         /// <summary>关闭窗口 = 隐藏到托盘；真正退出只有托盘/按钮的“退出”。</summary>
@@ -3572,7 +3573,7 @@ namespace gostGUI
         {
             try
             {
-                uint dpi = GetDpiForSystem();
+                uint dpi = NativeMethods.GetDpiForSystem();
                 if (dpi >= 48 && dpi <= 480)
                 {
                     return (int)dpi;
@@ -3973,8 +3974,8 @@ namespace gostGUI
 
                 try
                 {
-                    _previous = GetThreadDpiAwarenessContext();
-                    _applied = SetThreadDpiAwarenessContext(new IntPtr(DpiAwarenessContextUnaware));
+                    _previous = NativeMethods.GetThreadDpiAwarenessContext();
+                    _applied = NativeMethods.SetThreadDpiAwarenessContext(new IntPtr(DpiAwarenessContextUnaware));
                 }
                 catch (Exception)
                 {
@@ -3999,40 +4000,16 @@ namespace gostGUI
 
                 try
                 {
-                    SetThreadDpiAwarenessContext(_previous);
+                    NativeMethods.SetThreadDpiAwarenessContext(_previous);
                 }
                 catch (Exception)
                 {
                     // 恢复失败也没有可补救的动作。
                 }
             }
-
-            [DllImport("user32.dll")]
-            private static extern IntPtr GetThreadDpiAwarenessContext();
-
-            [DllImport("user32.dll")]
-            private static extern bool SetThreadDpiAwarenessContext(IntPtr dpiContext);
         }
 
-        // =====================================================================================
-        // P/Invoke
-        // =====================================================================================
-
         private const int SwRestore = 9;
-        private const byte VkMenu = 0x12;
-        private const uint KeyeventfKeyUp = 0x0002;
-
-        [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-        [DllImport("user32.dll")]
-        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-
-        [DllImport("user32.dll")]
-        private static extern uint GetDpiForSystem();
     }
 
     /// <summary>

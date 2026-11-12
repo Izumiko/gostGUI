@@ -1,6 +1,6 @@
 using System;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using gostGUI.Native;
 
 namespace gostGUI
 {
@@ -12,9 +12,6 @@ namespace gostGUI
     internal static class WindowTheme
     {
         private const string DarkScrollbarTheme = "DarkMode_Explorer";
-
-        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern int SetWindowTheme(IntPtr hwnd, string pszSubAppName, string pszSubIdList);
 
         /// <summary>
         /// 按浅/深色给控件自己的原生滚动条套用系统主题。
@@ -35,7 +32,7 @@ namespace gostGUI
                     return false;
                 }
 
-                return SetWindowTheme(handle, dark ? DarkScrollbarTheme : null, null) == 0;
+                return NativeMethods.SetWindowTheme(handle, dark ? DarkScrollbarTheme : null, null) == 0;
             }
             catch (Exception)
             {

@@ -13,6 +13,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using gostGUI.Native;
 using gostGUI.Shared;
 using Microsoft.Win32.SafeHandles;
 
@@ -175,6 +176,7 @@ namespace gostGUI
             Check("Config_SaveAfterFailedLoad_BacksUpOriginal", ConfigSaveAfterFailedLoadBacksUpOriginal);
             Check("Config_DuplicateItem_NamesAndInsertsAfterSource", ConfigDuplicateItemNamesAndInsertsAfterSource);
             Check("Config_MoveItem_PersistsOrder", ConfigMoveItemPersistsOrder);
+            Check("Config_SaveFailureSurfaces", ConfigSaveFailureSurfaces);
             Check("Form_PostToUi_MarshalsBeforeHandleExists", FormPostToUiMarshalsBeforeHandleExists);
             Check("Form_DuplicateKeepsListOrderInSyncWithManager", FormDuplicateKeepsListOrderInSyncWithManager);
             Check("Form_RenameEditorAlignsWithPaintedName", FormRenameEditorAlignsWithPaintedName);
@@ -206,6 +208,11 @@ namespace gostGUI
             Check("Log_RetainedRunsRecolourOnThemeChange", LogRetainedRunsRecolourOnThemeChange);
 
             Check("Form_SnapshotRendersBothThemes", FormSnapshotRendersBothThemes);
+
+            // P/Invoke 收口：INPUT 内存布局与 Alt 击键构造器。只检查布局与返回值，
+            // 绝不调用 SendInput —— 这台桌面是无人值守的，注入输入会打扰真实会话。
+            Check("Native_InputStructHasExpectedSize", NativeInputStructHasExpectedSize);
+            Check("Native_BuildAltKeyInputs_ReturnsAltDownThenAltUp", NativeBuildAltKeyInputsReturnsAltDownThenAltUp);
         }
 
         // 配置模型用例全部使用绝对临时路径：--selftest 不改变当前目录。
@@ -3175,6 +3182,8 @@ namespace gostGUI
             return mode.HasValue ? mode.Value.ToString() : "直连";
         }
 
+        // 测试专用 interop：本文件里的 TokenProbe / PipeLabelProbe / ConsoleOutput.CreateFile 探针
+        // 刻意留在自检套件内、不从 Native\ 暴露，避免生产程序集提供任何测试钩子。
         /// <summary>用例专用的令牌探针：与 ElevationManager 的实现各自独立声明同一组 P/Invoke。</summary>
         private static class TokenProbe
         {
@@ -4628,6 +4637,43 @@ namespace gostGUI
                 Assert(!manager.MoveItem(manager.Items[0], -1), "已在最前时上移应返回 false。");
                 Assert(!manager.MoveItem(manager.Items[2], 1), "已在最后时下移应返回 false。");
                 Assert(!manager.MoveItem(null, 1), "null 项应返回 false。");
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// 数据层不得吞掉保存失败：以目录作为配置路径时 Save() 必然失败，失败必须同时可观测：
+        /// 返回 false、SaveError 非空且为中文原因、SaveFailed 事件带同一原因触发一次。
+        /// 全程使用绝对临时路径，不碰用户那份 config.json。
+        /// </summary>
+        private static void ConfigSaveFailureSurfaces()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                // 目录不能被当作 config.json 写入：临时文件写完后替换/移动目标必然失败。
+                string unsavablePath = Path.Combine(dir, "config-as-directory");
+                Directory.CreateDirectory(unsavablePath);
+
+                var manager = new ConfigurationManager(unsavablePath);
+                AssertEqual("", manager.SaveError);
+
+                int raised = 0;
+                string reported = null;
+                manager.SaveFailed += message =>
+                {
+                    raised++;
+                    reported = message;
+                };
+
+                Assert(!manager.Save(), "以目录为配置路径时 Save() 必须返回 false。");
+                Assert(!string.IsNullOrEmpty(manager.SaveError), "保存失败时 SaveError 必须保留原因。");
+                Assert(manager.SaveError.Contains("保存"), "SaveError 应为中文保存错误：" + manager.SaveError);
+                AssertEqual(1, raised);
+                AssertEqual(manager.SaveError, reported);
             }
             finally
             {
@@ -6226,6 +6272,28 @@ namespace gostGUI
             {
                 DeleteTempDirectory(dir);
             }
+        }
+
+        /// <summary>INPUT 在 x64 必须是 40 字节、x86 必须是 28 字节；布局错了 SendInput 会拒绝整批输入。</summary>
+        private static void NativeInputStructHasExpectedSize()
+        {
+            int expected = IntPtr.Size == 8 ? 40 : 28;
+            AssertEqual(expected, Marshal.SizeOf<INPUT>());
+        }
+
+        /// <summary>构造器返回 Alt down + Alt up 两条键盘记录；只读数组，不注入输入。</summary>
+        private static void NativeBuildAltKeyInputsReturnsAltDownThenAltUp()
+        {
+            INPUT[] inputs = NativeMethods.BuildAltKeyInputs();
+            AssertEqual(2, inputs.Length);
+
+            AssertEqual(NativeMethods.InputKeyboard, inputs[0].type);
+            AssertEqual((ushort)NativeMethods.VkMenu, inputs[0].u.ki.wVk);
+            AssertEqual(0u, inputs[0].u.ki.dwFlags);
+
+            AssertEqual(NativeMethods.InputKeyboard, inputs[1].type);
+            AssertEqual((ushort)NativeMethods.VkMenu, inputs[1].u.ki.wVk);
+            AssertEqual(NativeMethods.KeyeventfKeyUp, inputs[1].u.ki.dwFlags);
         }
 
         /// <summary>断言文件存在、是 PNG、尺寸为 expectedWidth×expectedHeight，且内容非空。</summary>

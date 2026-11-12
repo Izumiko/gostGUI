@@ -72,6 +72,12 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <!-- 仅开发期：分析器不进入产物、不成为运行时依赖。 -->
+    <PackageReference Include="Microsoft.CodeAnalysis.NetAnalyzers">
+      <Version>11.0.100</Version>
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Common.cs" />
@@ -95,6 +101,7 @@
     <Compile Include="Theme\ThemedMenuRenderer.cs" />
     <Compile Include="Theme\UiPreview.cs" />
     <Compile Include="Shared\*.cs" />
+    <Compile Include="Native\*.cs" />
     <Compile Include="FormMain.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -123,15 +130,6 @@
     </None>
     <None Include="app.config" />
     <None Include="app.manifest" />
-    <None Include="Properties\Settings.settings">
-      <Generator>SettingsSingleFileGenerator</Generator>
-      <LastGenOutput>Settings.Designer.cs</LastGenOutput>
-    </None>
-    <Compile Include="Properties\Settings.Designer.cs">
-      <AutoGen>True</AutoGen>
-      <DependentUpon>Settings.settings</DependentUpon>
-      <DesignTimeSharedInput>True</DesignTimeSharedInput>
-    </Compile>
   </ItemGroup>
   <ItemGroup>
     <Content Include="smile-full.ico" />

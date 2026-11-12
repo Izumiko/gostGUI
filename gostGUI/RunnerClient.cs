@@ -9,6 +9,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using gostGUI.Native;
 using gostGUI.Shared;
 
 namespace gostGUI
@@ -535,17 +536,17 @@ namespace gostGUI
                 // ACL 头（8）+ ACE 头（4）+ 强制策略掩码（4）+ SID。
                 int aclLength = 8 + 4 + 4 + sidBytes.Length;
                 aclBuffer = Marshal.AllocHGlobal(aclLength);
-                if (!InitializeAcl(aclBuffer, (uint)aclLength, AclRevision))
+                if (!NativeMethods.InitializeAcl(aclBuffer, (uint)aclLength, AclRevision))
                 {
                     throw LabelFailure("初始化管道强制标签 ACL");
                 }
 
-                if (!AddMandatoryAce(aclBuffer, AclRevision, 0, SystemMandatoryLabelNoWriteUp, sidBuffer))
+                if (!NativeMethods.AddMandatoryAce(aclBuffer, AclRevision, 0, SystemMandatoryLabelNoWriteUp, sidBuffer))
                 {
                     throw LabelFailure("写入管道强制标签 ACE");
                 }
 
-                uint result = SetSecurityInfo(pipeHandle, SeKernelObject, LabelSecurityInformation,
+                uint result = NativeMethods.SetSecurityInfo(pipeHandle, SeKernelObject, LabelSecurityInformation,
                     IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, aclBuffer);
                 if (result != 0)
                 {
@@ -607,10 +608,10 @@ namespace gostGUI
                 // PROCESS_QUERY_LIMITED_INFORMATION，但只开 LIMITED 在部分令牌/跨权限场景会被拒绝，
                 // 身份就会静默落到“无法读取身份”。先按两者合一打开（同用户 runner 一定够权）；
                 // 个别跨权限句柄只允许 LIMITED 时再退回它。
-                hProcess = OpenProcess(ProcessQueryInformation | ProcessQueryLimitedInformation, false, process.Id);
+                hProcess = NativeMethods.OpenProcess(ProcessQueryInformation | ProcessQueryLimitedInformation, false, process.Id);
                 if (hProcess == IntPtr.Zero)
                 {
-                    hProcess = OpenProcess(ProcessQueryLimitedInformation, false, process.Id);
+                    hProcess = NativeMethods.OpenProcess(ProcessQueryLimitedInformation, false, process.Id);
                 }
 
                 if (hProcess == IntPtr.Zero)
@@ -618,20 +619,20 @@ namespace gostGUI
                     return null;
                 }
 
-                if (!OpenProcessToken(hProcess, TokenQuery, out token))
+                if (!NativeMethods.OpenProcessToken(hProcess, TokenQuery, out token))
                 {
                     return null;
                 }
 
                 uint needed;
-                GetTokenInformation(token, TokenUserInformation, IntPtr.Zero, 0, out needed);
+                NativeMethods.GetTokenInformation(token, TokenUserInformation, IntPtr.Zero, 0, out needed);
                 if (needed == 0)
                 {
                     return null;
                 }
 
                 buffer = Marshal.AllocHGlobal((int)needed);
-                if (!GetTokenInformation(token, TokenUserInformation, buffer, needed, out needed))
+                if (!NativeMethods.GetTokenInformation(token, TokenUserInformation, buffer, needed, out needed))
                 {
                     return null;
                 }
@@ -666,12 +667,12 @@ namespace gostGUI
 
                 if (token != IntPtr.Zero)
                 {
-                    CloseHandle(token);
+                    NativeMethods.CloseHandle(token);
                 }
 
                 if (hProcess != IntPtr.Zero)
                 {
-                    CloseHandle(hProcess);
+                    NativeMethods.CloseHandle(hProcess);
                 }
             }
         }
@@ -1395,6 +1396,7 @@ namespace gostGUI
 
         // =====================================================================================
         // 强制完整性标签与 runner 身份查询的原生入口（只在 Windows 上运行，net48 没有托管替代）。
+        // 声明已收口到 gostGUI.Native，这里只保留本文件用到的权限常量。
         // =====================================================================================
 
         private const int TokenUserInformation = 1;
@@ -1406,29 +1408,5 @@ namespace gostGUI
         private const uint SystemMandatoryLabelNoWriteUp = 0x00000001;
         private const uint AclRevision = 2;
 
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool InitializeAcl(IntPtr pAcl, uint nAclLength, uint dwAclRevision);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool AddMandatoryAce(IntPtr pAcl, uint dwAceRevision, uint aceFlags,
-            uint mandatoryPolicy, IntPtr pLabelSid);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern uint SetSecurityInfo(IntPtr handle, int objectType, uint securityInfo,
-            IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr OpenProcess(uint desiredAccess,
-            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, int processId);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out IntPtr token);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool GetTokenInformation(IntPtr token, int informationClass, IntPtr information,
-            uint informationLength, out uint returnLength);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CloseHandle(IntPtr handle);
     }
 }

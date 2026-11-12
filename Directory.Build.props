@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仓库级构建属性（由 Microsoft.Common.props 自动导入，两个工程共用）。
+  注意：本仓库是旧式 csproj，只导入 Microsoft.Common.props / Microsoft.CSharp.targets，
+  不导入 Microsoft.NET.Sdk.Analyzers.targets；下面两条属性因此与 SDK 式工程语义不同，
+  注释按“实际效果”写，不按它们名字的暗示写。
+-->
+<Project>
+  <!-- AnalysisMode 裁定（本计划）：保持 Default，不改成 Recommended/All。
+       分析器基线刻意保持“无输出”；Task 5/6 的结构性门禁靠编译器警告
+       （CS0114 / CS0108 / CS0168），它们与 CA 分析器是否启用无关。 -->
+  <PropertyGroup>
+    <!-- 任务书要求保留该属性。旧式 csproj 不消费它（AnalysisLevel → EffectiveAnalysisLevel
+         的换算在 SDK 目标里），在这里是 no-op；真正生效的档位是下面的 EffectiveAnalysisLevel。 -->
+    <AnalysisLevel>latest</AnalysisLevel>
+    <!-- 旧式 csproj 没有 SDK 的档位换算，这里显式钉到分析器包 11.0.100 的规则集，
+         分析器包的 target 才会选中 analysislevel_11_default.globalconfig。
+         升级 Microsoft.CodeAnalysis.NetAnalyzers 时必须同步 bump 这个数字：
+         数字过期会静默沿用旧规则集，而不会报错。 -->
+    <EffectiveAnalysisLevel>11.0</EffectiveAnalysisLevel>
+    <!-- 任务书要求保留该属性。旧式 csproj 上没有构建期效果：codestyle 分析器只由 .NET SDK 的
+         Microsoft.NET.Sdk.Analyzers.targets 在 EnforceCodeStyleInBuild=true 时注入；
+         本仓库不导入 SDK 目标，csc 的 /analyzer 列表里没有 Microsoft.CodeAnalysis.CSharp.CodeStyle.dll。
+         迁移到 SDK 式工程或显式引入 codestyle 分析器包后才会生效；属性留作后续迁移的约定。 -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <!-- 本任务只建立基线，不全局开可空；需要时按文件加 #nullable enable
+         （巨型文件留到拆分后逐段开启）。不设 TreatWarningsAsErrors：net48 旧代码会直接卡死构建。 -->
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+</Project>

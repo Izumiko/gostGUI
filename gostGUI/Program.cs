@@ -1,9 +1,8 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using gostGUI.Native;
 
 namespace gostGUI
 {
@@ -11,9 +10,6 @@ namespace gostGUI
     {
         // WinExe 启动时没有自己的控制台；--selftest 时尽力接上父进程的控制台，让输出可见。
         private const int AttachParentProcess = -1;
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool AttachConsole(int processId);
 
         /// <summary>
         /// 应用程序的主入口点。
@@ -27,7 +23,7 @@ namespace gostGUI
                 string previewDirectory = GetOptionValue(args, "--ui-preview");
                 if (!IsDirectoryArgument(previewDirectory))
                 {
-                    AttachConsole(AttachParentProcess);
+                    NativeMethods.AttachConsole(AttachParentProcess);
                     Console.WriteLine("FAIL --ui-preview 需要一个输出目录参数，不能把另一个 -- 开关当作目录。");
                     return 1;
                 }
@@ -38,7 +34,7 @@ namespace gostGUI
                 string snapshotDirectory = GetOptionValue(args, "--ui-snapshot");
                 if (!IsDirectoryArgument(snapshotDirectory))
                 {
-                    AttachConsole(AttachParentProcess);
+                    NativeMethods.AttachConsole(AttachParentProcess);
                     Console.WriteLine("FAIL --ui-snapshot 需要一个输出目录参数，不能把另一个 -- 开关当作目录。");
                     return 1;
                 }
@@ -48,14 +44,14 @@ namespace gostGUI
             if (args.Any(a => a == "--selftest"))
             {
                 // 接不上控制台就算了，此时只剩退出码与 selftest.log 可用。
-                AttachConsole(AttachParentProcess);
+                NativeMethods.AttachConsole(AttachParentProcess);
                 return SelfTest.RunAll();
             }
 
             // 隐藏的中转进程端到端探针：只跑 relay smoke，退出码沿用 0/1 约定。
             if (args.Any(a => a == "--runner-smoke"))
             {
-                AttachConsole(AttachParentProcess);
+                NativeMethods.AttachConsole(AttachParentProcess);
                 return SelfTest.RunRunnerSmoke();
             }
 
@@ -63,7 +59,7 @@ namespace gostGUI
             // 必须赶在任何 WinForms 消息循环之前，且只初始化一次文本渲染模式。
             if (args.Any(a => a == "--ui-preview"))
             {
-                AttachConsole(AttachParentProcess);
+                NativeMethods.AttachConsole(AttachParentProcess);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 return UiPreview.Run(GetOptionValue(args, "--ui-preview"));
@@ -73,7 +69,7 @@ namespace gostGUI
             // 用 DrawToBitmap 输出 form-light.png / form-dark.png，绝不 Show()。
             if (args.Any(a => a == "--ui-snapshot"))
             {
-                AttachConsole(AttachParentProcess);
+                NativeMethods.AttachConsole(AttachParentProcess);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 return FormMain.RunUiSnapshotCli(GetOptionValue(args, "--ui-snapshot"));
