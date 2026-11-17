@@ -12,7 +12,9 @@ namespace gostGUI
 {
     /// <summary>
     /// 同权限直连启动的进程管理器：由 LaunchPipeline 装配启动参数，应用工作目录与环境变量覆盖，
-    /// 把 stdout / stderr / 系统消息分别上报，并用 Job Object 在工具退出或崩溃时清理子进程树。
+    /// 把 stdout / stderr / 系统消息分别上报，并用**每个配置项各自一个** Job Object 管理它拉起的进程树：
+    /// 停止这一项时整棵树一起结束（bat/cmd 拉起的 node 等子孙进程也不例外），
+    /// 工具退出或崩溃时随 Job 句柄关闭由内核兜底清理。各项之间互不连坐。
     /// <para>
     /// 调试开关 GOSTGUI_FORCE_RUNNER=1 时全部改走中转进程（RunnerSession），事件与状态语义保持一致；
     /// 默认路径不变，仍然在 UI 进程内直接启动子进程。
@@ -29,8 +31,16 @@ namespace gostGUI
         private readonly Dictionary<ConfigItem, Process> _processes = new Dictionary<ConfigItem, Process>();
         private readonly Dictionary<ConfigItem, RunnerSession> _sessions =
             new Dictionary<ConfigItem, RunnerSession>();
+
+        /// <summary>
+        /// 每个直连配置项一份 Job 句柄（与 <see cref="_processes"/> 同生共死）。
+        /// 每项单独的 Job 才能“只杀掉这一项的进程树”，共用一个 Job 时停止一项就会连坐所有项；
+        /// 崩溃兜底不变：句柄随 UI 进程消失而关闭，Job 内的进程由 KILL_ON_JOB_CLOSE 一并终结。
+        /// </summary>
+        private readonly Dictionary<ConfigItem, JobObjectManager> _jobs =
+            new Dictionary<ConfigItem, JobObjectManager>();
+
         private readonly object _lock = new object();
-        private readonly JobObjectManager _jobManager;
 
         public event Action<ConfigItem, LogKind, string> OutputReceived;
         public event Action<ConfigItem, int> ProcessExited;
@@ -39,19 +49,6 @@ namespace gostGUI
 
         /// <summary>最近一次启动失败是否源于“需要管理员权限”（Win32 740）；供 Task 9 的提权路径决策。</summary>
         public bool LastStartErrorIsElevationRequired { get; private set; }
-
-        public ProcessManager()
-        {
-            try
-            {
-                _jobManager = new JobObjectManager();
-            }
-            catch (Exception ex)
-            {
-                // Propagate the exception to be handled by the UI layer.
-                throw new InvalidOperationException("Failed to create Job Object for process management.", ex);
-            }
-        }
 
         public bool IsProcessRunning(ConfigItem item)
         {
@@ -160,6 +157,7 @@ namespace gostGUI
             Process p = null;
             RunnerSession session = null;
             StartSequence sequence = null;
+            JobObjectManager itemJob = null;
             string startupError = null;
             bool elevationRequired = false;
             RunnerLaunchMode? launchMode = null;
@@ -256,6 +254,18 @@ namespace gostGUI
             {
                 try
                 {
+                    // 先把这一项自己的 Job 建好：子进程一启动就加进去，停止时 TerminateJobObject 才能带走整棵树
+                    // （根进程是 cmd.exe 时，bat 拉起的 node 等子孙进程都在这个 Job 里）。
+                    // 建不出来只失去“整棵树一起结束”的能力，不阻止启动（退回到只杀根进程的旧行为）。
+                    try
+                    {
+                        itemJob = new JobObjectManager();
+                    }
+                    catch (Exception ex)
+                    {
+                        TryLogSystem(configItem, "创建 Job Object 失败，停止时只能结束根进程：" + ex.Message);
+                    }
+
                     ProcessStartInfo startInfo = CreateStartInfo(request);
                     p = new Process
                     {
@@ -284,6 +294,20 @@ namespace gostGUI
                     {
                         startupError = "启动失败：无法创建子进程。";
                     }
+                    else if (itemJob != null && !itemJob.AddProcess(p))
+                    {
+                        // 子进程可能刚好已退出（句柄失效）或已在别的 Job 里：加入失败只失去
+                        // “停止时连带结束子孙进程”的能力，不影响本次启动结论；也绝不保留一个空 Job
+                        // 让停止路径误以为可以整树终止——那样根进程会活下来。
+                        if (!HasExitedSafe(p))
+                        {
+                            TryLogSystem(configItem,
+                                "子进程未能加入 Job，停止时无法保证结束它拉起的整棵进程树。");
+                        }
+
+                        TryDisposeJob(itemJob);
+                        itemJob = null;
+                    }
                 }
                 catch (Win32Exception ex)
                 {
@@ -308,6 +332,10 @@ namespace gostGUI
                 {
                     SafeDispose(p);
                 }
+
+                // 启动失败时这个 Job 里不可能有活着的子孙进程；关掉句柄即可，绝不留下悬空句柄。
+                TryDisposeJob(itemJob);
+                itemJob = null;
 
                 if (session != null)
                 {
@@ -352,24 +380,28 @@ namespace gostGUI
             }
             else
             {
+                JobObjectManager staleJob = null;
+                bool jobRegistered = false;
                 try
                 {
-                    _jobManager.AddProcess(p);
-                }
-                catch (Exception)
-                {
-                    // 子进程可能已退出（句柄失效）或已在别的 Job 里；加入 Job 失败不影响本次启动结论。
-                }
-
-                try
-                {
-                    // 在锁内完成“检查未退出 + 登记”，与 Exited 回调里的“锁内移除”互斥：
-                    // 快速退出的子进程不会在字典里留下“已退出但仍登记为运行中”的记录。
+                    // 在锁内完成“检查未退出 + 登记进程与它的 Job”，与 Exited 回调 / 停止路径里的
+                    // “锁内移除”互斥：快速退出的子进程不会在字典里留下“已退出但仍登记为运行中”的记录。
                     lock (_lock)
                     {
                         if (!HasExitedSafe(p))
                         {
+                            if (_jobs.TryGetValue(configItem, out staleJob))
+                            {
+                                // 正常路径不会走到：进程已不登记却还留着 Job 句柄（旧轮次收尾失败）。
+                                _jobs.Remove(configItem);
+                            }
+
                             _processes[configItem] = p;
+                            if (itemJob != null)
+                            {
+                                _jobs[configItem] = itemJob;
+                                jobRegistered = true;
+                            }
                         }
                     }
                 }
@@ -380,6 +412,19 @@ namespace gostGUI
                         LogSystem(configItem, "登记子进程失败：" + ex.Message);
                     }
                     catch { }
+                }
+                finally
+                {
+                    // 没有随登记转移给字典的 Job：根进程在登记前就退出了（快速退出），
+                    // 关掉句柄还能顺手带走它拉起的残余子孙进程，不让它们变成孤儿。
+                    if (!jobRegistered)
+                    {
+                        TryDisposeJob(itemJob);
+                        itemJob = null;
+                    }
+
+                    // 上一轮遗留的 Job 句柄（正常路径不会出现）：整树收口，避免泄漏句柄与孤儿进程。
+                    TryDisposeJob(staleJob);
                 }
 
                 // 先启动异步读，再触发 started；子进程已退出时读线程可能起不来，退出事件仍会照常上报。
@@ -434,7 +479,7 @@ namespace gostGUI
 
         /// <summary>
         /// 异步停止一个配置项：中转会话走 <see cref="RunnerSession.StopAsync(TimeSpan)"/>，直连子进程
-        /// kill 后等待退出（最多 <paramref name="timeout"/>）。登记项的移出仍在锁内同步完成，
+        /// 结束它整棵进程树后等待根进程退出（最多 <paramref name="timeout"/>）。登记项的移出仍在锁内同步完成，
         /// 与 <see cref="IsProcessRunning"/> / 启动路径的“先查后改”保持互斥；公开事件一律在锁外触发。
         /// <para>
         /// 死锁说明：本方法（以及 <see cref="StopAllProcessesAsync"/>、<see cref="RunnerSession.StopAsync"/>）
@@ -448,6 +493,7 @@ namespace gostGUI
 
             Process p = null;
             RunnerSession session = null;
+            JobObjectManager job = null;
             lock (_lock)
             {
                 if (_processes.TryGetValue(configItem, out p))
@@ -459,11 +505,17 @@ namespace gostGUI
                 {
                     _sessions.Remove(configItem);
                 }
+
+                if (_jobs.TryGetValue(configItem, out job))
+                {
+                    _jobs.Remove(configItem);
+                }
             }
 
             if (session != null)
             {
                 // R27：先礼后兵——发 stop 等 exit，超时后 RunnerSession 会杀 runner，由 runner 的 Job 带走子进程树。
+                TryDisposeJob(job);
                 try
                 {
                     await session.StopAsync(timeout).ConfigureAwait(false);
@@ -487,17 +539,23 @@ namespace gostGUI
 
             if (p != null)
             {
-                await StopDirectProcessAsync(configItem, p, timeout).ConfigureAwait(false);
+                await StopDirectProcessAsync(configItem, p, job, timeout).ConfigureAwait(false);
+                return;
             }
+
+            // 没有登记的根进程却还留着 Job 句柄（理论边界）：整树口径更保守，一并收口，
+            // 绝不把上一轮的子孙进程留给下一次启动去撞端口/文件锁。
+            TryDisposeJob(job);
         }
 
         /// <summary>
-        /// 直连子进程的异步停止：kill 后等待退出，最多 <paramref name="timeout"/>。
+        /// 直连子进程的异步停止：先结束这一项 Job 内的整棵进程树（没有 Job 时退回只杀根进程），
+        /// 再等根进程退出，最多 <paramref name="timeout"/>。
         /// <para>
         /// 事件顺序保持不变：旧实现是 Kill 后立即 Dispose，本次构建上 20 次采样中进程退出回调均抢不过
         /// Dispose，订阅者没有观测到 ProcessExited（直连停止只报 ProcessStopped；这是实测结果，不是普遍保证，
-        /// 回调时序仍取决于运行时）。这里在 kill 前显式关闭退出事件的观察者，再等待退出，因此不会多出一条
-        /// “进程已退出”的 UI 日志；kill 失败时立即收尾。
+        /// 回调时序仍取决于运行时）。这里在终止前显式关闭退出事件的观察者，再等待退出，因此不会多出一条
+        /// “进程已退出”的 UI 日志；终止失败时立即收尾。
         /// </para>
         /// <para>
         /// 收尾等待只查询进程句柄，**不调用** <c>Process.WaitForExit(...)</c>：net48 的
@@ -508,15 +566,30 @@ namespace gostGUI
         /// 因此等待严格受 <paramref name="timeout"/> 约束，不会被管道 EOF 拖住。
         /// </para>
         /// </summary>
-        private async Task StopDirectProcessAsync(ConfigItem configItem, Process process, TimeSpan timeout)
+        private async Task StopDirectProcessAsync(ConfigItem configItem, Process process, JobObjectManager job,
+            TimeSpan timeout)
         {
             try
             {
-                if (!process.HasExited)
+                if (!HasExitedSafe(process))
                 {
-                    // 保留“主动停止不报 ProcessExited”的既有语义（见方法注释）。
-                    process.EnableRaisingEvents = false;
-                    process.Kill();
+                    // 保留“主动停止不报 ProcessExited”的既有语义（见方法注释）：必须在终止前关掉观察者。
+                    try
+                    {
+                        process.EnableRaisingEvents = false;
+                    }
+                    catch (Exception)
+                    {
+                        // 句柄刚好失效：后面的终止逻辑照常执行。
+                    }
+                }
+
+                // 整棵树一起结束：根进程是 cmd.exe 时，bat 拉起的 node 等子孙进程只有一起终止，
+                // 才不会在下次启动时因为端口/文件锁冲突起不来（旧实现只 Kill 根进程，子孙全留成孤儿）。
+                if (!TerminateJobQuietly(configItem, job))
+                {
+                    // Job 不可用（创建/加入失败）：退回只杀根进程的原有行为。
+                    KillRootQuietly(process);
                 }
 
                 // 主动停止不关心剩余输出；取消异步读流，避免读者继续为孙进程持有的管道排队。
@@ -532,12 +605,76 @@ namespace gostGUI
             }
             finally
             {
+                // 关 Job 句柄：若终止 Job 之后还有残余进程（极端时序），KILL_ON_JOB_CLOSE 会补最后一刀。
+                TryDisposeJob(job);
                 try
                 {
                     process.Dispose();
                 }
                 catch { }
                 ProcessStopped?.Invoke(configItem);
+            }
+        }
+
+        /// <summary>
+        /// 终止整棵进程树；<paramref name="job"/> 为空（创建/加入失败）或已释放时返回 false，
+        /// 由调用方退回“只杀根进程”。绝不抛异常。
+        /// </summary>
+        private bool TerminateJobQuietly(ConfigItem configItem, JobObjectManager job)
+        {
+            if (job == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (job.Terminate())
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                TryLogSystem(configItem, "终止进程树失败：" + ex.Message);
+                return false;
+            }
+
+            TryLogSystem(configItem, "终止进程树失败，退回只结束根进程。");
+            return false;
+        }
+
+        /// <summary>Kill 根进程：它已经退出（例如刚被 Job 终止带走）不算失败，其余异常交给调用方记录。</summary>
+        private static void KillRootQuietly(Process process)
+        {
+            try
+            {
+                if (!HasExitedSafe(process))
+                {
+                    process.Kill();
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // 目标已经退出：正是想要的结果。
+            }
+        }
+
+        /// <summary>关闭 Job 句柄（KILL_ON_JOB_CLOSE 会带走里面残留的子孙进程）；空句柄与异常都忽略。</summary>
+        private static void TryDisposeJob(JobObjectManager job)
+        {
+            if (job == null)
+            {
+                return;
+            }
+
+            try
+            {
+                job.Dispose();
+            }
+            catch (Exception)
+            {
+                // 释放失败只意味着兜底清理不可用，不影响停止结论。
             }
         }
 
@@ -630,7 +767,20 @@ namespace gostGUI
         public void Dispose()
         {
             StopAllProcesses();
-            _jobManager?.Dispose();
+
+            // 兜底：还没被停止/退出路径收口的 Job 句柄（理论上只在极端路径出现）一并关闭，
+            // KILL_ON_JOB_CLOSE 会带走里面残留的进程，工具退出后不留孤儿。
+            List<JobObjectManager> leftoverJobs;
+            lock (_lock)
+            {
+                leftoverJobs = new List<JobObjectManager>(_jobs.Values);
+                _jobs.Clear();
+            }
+
+            foreach (JobObjectManager job in leftoverJobs)
+            {
+                TryDisposeJob(job);
+            }
         }
 
         /// <summary>
@@ -743,6 +893,7 @@ namespace gostGUI
             p.Exited += (sender, e) =>
             {
                 int exitCode = GetExitCodeSafe(p);
+                JobObjectManager leftoverJob = null;
                 lock (_lock)
                 {
                     // 只移除自己这一条：停止后立刻重启同一个配置项时，旧进程的退出回调
@@ -750,8 +901,20 @@ namespace gostGUI
                     if (_processes.TryGetValue(configItem, out Process current) && ReferenceEquals(current, p))
                     {
                         _processes.Remove(configItem);
+
+                        // Job 与进程成对登记，也成对移除；停止路径已先移除时这里拿不到。
+                        if (_jobs.TryGetValue(configItem, out leftoverJob))
+                        {
+                            _jobs.Remove(configItem);
+                        }
                     }
                 }
+
+                // 根进程自己退出时，它拉起的子孙进程（bat 里的 node 等）不能留成孤儿：
+                // 关掉这一项的 Job，残留进程随 KILL_ON_JOB_CLOSE 一起结束。口径与中转路径
+                // （runner 关闭自己的 Job）和“点停止结束整棵树”一致；否则界面显示“已停止”，
+                // 下次启动却因为端口/文件锁冲突起不来。必须在派发退出事件之前做完。
+                TryDisposeJob(leftoverJob);
 
                 sequence.NotifyExit(exitCode, code => ProcessExited?.Invoke(configItem, code));
             };

@@ -51,7 +51,7 @@ The committed snapshots below are rendered off-screen by the hidden `--ui-snapsh
 
 - `Form/`：`FormMain` 的 partial 拆分（配置列表、详情编辑器、日志面板、托盘/退出、启动、窗口状态、主题、快照），每个文件只负责一块界面职责。
 - `Native/`：按 DLL 收口的 P/Invoke 声明与互操作结构体（kernel32 / user32 / advapi32 / dwmapi / shell32 / uxtheme）。
-- `SelfTest/`：隐藏 `--selftest` 套件的 partial 拆分，按领域组织用例、断言与夹具（当前 128 个用例，全部通过时进程退出码为 0）。
+- `SelfTest/`：隐藏 `--selftest` 套件的 partial 拆分，按领域组织用例、断言与夹具（当前 130 个用例，全部通过时进程退出码为 0）。
 - `Shared/`：UI 与 Runner 两个进程共享编译的代码（IPC 帧、启动 spec、环境块、Job 对象，以及 `ChildKind` / `IsExternalInit` 等共享类型）。
 - `Theme/`：主题化控件、调色板与主题管理器（按钮、输入框、列表、菜单渲染等）。
 - 根目录文件：主窗体骨架（`FormMain.cs` / `FormMain.Designer.cs`）、数据与进程层（`Common` / `ConfigurationManager` / `ProcessManager`）、权限与中转（`ElevationManager` / `RunnerClient`）、启动管线（`LaunchPipeline` / `ProgramResolver` / `WindowGeometry`）、日志与入口（`LogKind` / `LogViewManager` / `Program.cs`）。
@@ -114,6 +114,8 @@ A clean **Rebuild** (`MSBuild gostGUI.sln /t:Rebuild /p:Configuration=Release`) 
 
 ### Change log
 
+- **未发布**：
+  - 修复：停止直连配置项时只结束了根进程，`.bat/.cmd` 拉起的子进程（`node` 等）会留成孤儿，占着端口/文件导致再次启动冲突。现在每个配置项各有一个 Job Object，停止即结束这一项的整棵进程树；根进程自己退出时也会带走它残留的子孙进程（口径与中转路径一致）。各项之间仍互不连坐。
 - **v1.9**:
   - 新增每项独立工作目录：空值表示本工具所在目录，支持 `%VAR%` 与相对路径。
   - 新增每项环境变量：在父进程环境之上增量覆盖，支持 `%VAR%`，`PATH=%PATH%;C:\tools` 这类写法直接可用。

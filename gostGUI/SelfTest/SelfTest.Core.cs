@@ -107,6 +107,8 @@ namespace gostGUI
             Check("Direct_GetChildPid_IsLiveThenZero", DirectGetChildPidIsLiveThenZero);
             Check("Process_StopAsyncCompletes", ProcessStopAsyncCompletes);
             Check("Process_StopWithInheritedPipeCompletes", ProcessStopWithInheritedPipeCompletes);
+            Check("Process_StopKillsBatchChildTree", ProcessStopKillsBatchChildTree);
+            Check("Process_ExitKillsLeftoverChildTree", ProcessExitKillsLeftoverChildTree);
             Check("Direct_ElevationRequired_IsDetected", DirectElevationRequiredIsDetected);
 
             // 边界用例放在 Direct 之后：accept 分支会触发一次性的父环境规范化，

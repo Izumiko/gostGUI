@@ -412,6 +412,143 @@ namespace gostGUI
             }
         }
 
+        /// <summary>
+        /// 回归（用户报告）：配置项指向 bat 时，根进程只是 cmd.exe；旧实现停止时只 Kill 根进程，
+        /// bat 拉起的 node 等子孙进程会活下来占着端口/文件，再点“启动”就冲突。
+        /// 停止必须结束这一项的整棵进程树。
+        /// <para>
+        /// 夹具用“复制出来的 ping.exe + 唯一进程名”代表 node：既能在系统里精确定位这个子进程，
+        /// 又不依赖机器的 node 环境。Program 直接指向 .bat，走的正是用户的真实路径
+        /// （LaunchPipeline 会包装成 cmd /d /s /c）。
+        /// </para>
+        /// </summary>
+        private static void ProcessStopKillsBatchChildTree()
+        {
+            string dir = CreateTempDirectory();
+            string childName = "gostchild" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            string childExe = Path.Combine(dir, childName + ".exe");
+            string batPath = Path.Combine(dir, "run-child.bat");
+            try
+            {
+                File.Copy(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ping.exe"),
+                    childExe);
+                File.WriteAllText(batPath,
+                    "@echo off\r\n\"" + childExe + "\" -n 120 127.0.0.1 >nul\r\n", new UTF8Encoding(false));
+
+                using (ProcessManager manager = new ProcessManager())
+                {
+                    ConfigItem item = NewDirectItem(string.Empty, dir);
+                    item.Program = batPath;
+
+                    Assert(manager.StartProcess(item), "bat 配置项应启动成功");
+                    int rootPid = manager.GetChildPid(item);
+                    Assert(rootPid > 0, "运行中应拿到根进程（cmd.exe）的 PID");
+                    Assert(WaitUntil(() => CountProcessesByName(childName) == 1, DirectWaitTimeoutMs),
+                        "bat 应拉起子进程 " + childName + "（夹具自检）");
+
+                    manager.StopProcess(item);
+
+                    Assert(!manager.IsProcessRunning(item), "停止后不应仍在运行");
+                    Assert(WaitUntil(() => IsProcessGone(rootPid), DirectWaitTimeoutMs),
+                        "停止后根进程应消失（PID " + rootPid + "）");
+                    Assert(WaitUntil(() => CountProcessesByName(childName) == 0, DirectWaitTimeoutMs),
+                        "停止后 bat 拉起的子进程也必须一起结束；旧实现只 Kill cmd.exe，把 "
+                        + childName + " 留成了孤儿进程");
+                }
+            }
+            finally
+            {
+                KillProcessesByName(childName);
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>
+        /// 根进程自己退出时（典型是 bat 用 start 把服务放到后台后自己结束），它拉起的子孙进程不能留成孤儿：
+        /// 否则界面显示“已停止”，实际进程还在跑，下次启动照样撞端口/文件锁。
+        /// 口径与中转路径（runner 在子进程退出后关闭自己的 Job）以及“点停止结束整棵树”一致。
+        /// </summary>
+        private static void ProcessExitKillsLeftoverChildTree()
+        {
+            string dir = CreateTempDirectory();
+            string childName = "gostchild" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            string childExe = Path.Combine(dir, childName + ".exe");
+            string batPath = Path.Combine(dir, "run-background.bat");
+            try
+            {
+                File.Copy(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ping.exe"),
+                    childExe);
+                File.WriteAllText(batPath,
+                    "@echo off\r\nstart /b \"\" \"" + childExe + "\" -n 120 127.0.0.1 >nul\r\n"
+                    + "ping -n 3 127.0.0.1 >nul\r\n",
+                    new UTF8Encoding(false));
+
+                using (ProcessManager manager = new ProcessManager())
+                {
+                    DirectRun run = new DirectRun();
+                    run.Attach(manager);
+
+                    ConfigItem item = NewDirectItem(string.Empty, dir);
+                    item.Program = batPath;
+
+                    Assert(manager.StartProcess(item), "bat 配置项应启动成功");
+                    Assert(WaitUntil(() => CountProcessesByName(childName) == 1, DirectWaitTimeoutMs),
+                        "bat 应先用 start 拉起后台子进程 " + childName);
+
+                    Assert(WaitUntil(() => run.Exited, DirectWaitTimeoutMs),
+                        "bat 自己结束后应上报退出事件：" + run.Describe());
+                    Assert(WaitUntil(() => CountProcessesByName(childName) == 0, DirectWaitTimeoutMs),
+                        "根进程退出后，它拉起的子进程不能留成孤儿；否则界面显示已停止，"
+                        + childName + " 却还在跑");
+                }
+            }
+            finally
+            {
+                KillProcessesByName(childName);
+                DeleteTempDirectory(dir);
+            }
+        }
+
+        /// <summary>按进程名统计实例数（用完立即释放句柄），用于精确定位 bat 拉起的子进程。</summary>
+        private static int CountProcessesByName(string name)
+        {
+            Process[] processes = Process.GetProcessesByName(name);
+            try
+            {
+                return processes.Length;
+            }
+            finally
+            {
+                foreach (Process process in processes)
+                {
+                    process.Dispose();
+                }
+            }
+        }
+
+        /// <summary>清理夹具：用例失败时残留的同名子进程必须收掉，否则临时目录删不掉。</summary>
+        private static void KillProcessesByName(string name)
+        {
+            foreach (Process process in Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill();
+                    }
+                }
+                catch (Exception)
+                {
+                    // 清理失败不影响用例结论。
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
+
         private static void DirectElevationRequiredIsDetected()
         {
             string msconfig = Path.Combine(
