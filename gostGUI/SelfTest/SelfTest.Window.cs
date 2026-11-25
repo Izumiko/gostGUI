@@ -325,6 +325,16 @@ namespace gostGUI
             }
         }
 
+        private sealed class TrayVisibilityTestForm : FormMain
+        {
+            internal TrayVisibilityTestForm(ConfigurationManager manager) : base(true, manager) { }
+
+            protected override bool ShowWithoutActivation => true;
+
+            // 不运行主窗体的 OnShown：自检不在系统托盘注册图标。
+            protected override void OnShown(EventArgs e) { }
+        }
+
         private static void FormTrayRoundTripKeepsWindowHandle()
         {
             string dir = CreateTempDirectory();
@@ -340,14 +350,15 @@ namespace gostGUI
                 }, path), "写夹具应成功：" + Common.LastSaveError);
 
                 MethodInfo restore = typeof(FormMain).GetMethod(
-                    "RestoreAndBringToFront", BindingFlags.Instance | BindingFlags.NonPublic);
-                Assert(restore != null, "应能调用托盘恢复入口。");
+                    "RestoreTrayVisibility", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert(restore != null, "自检需要不抢前台、不注入按键的窗口恢复入口。");
                 var manager = new ConfigurationManager(path);
                 RunOnDedicatedSta(() =>
                 {
-                    using (var form = new FormMain(true, manager))
+                    using (var form = new TrayVisibilityTestForm(manager))
                     {
                         form.SuppressDialogsForTest = true;
+                        form.Opacity = 0;
                         form.Show();
                         Assert(form.Visible, "自检应从可见的窗体开始。");
                         IntPtr handle = form.Handle;

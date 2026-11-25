@@ -60,8 +60,7 @@ namespace gostGUI
             RestoreAndBringToFront();
         }
 
-        /// <summary>还原窗口并抢到前台：保留 v1.8 的 TopMost + Alt 击键方案（v1.9 用 SendInput 实现）。</summary>
-        private void RestoreAndBringToFront()
+        private void RestoreTrayVisibility()
         {
             if (!Visible)
             {
@@ -72,7 +71,12 @@ namespace gostGUI
             {
                 WindowState = FormWindowState.Normal;
             }
+        }
 
+        /// <summary>还原窗口并抢到前台：保留 v1.8 的 TopMost + Alt 击键方案（v1.9 用 SendInput 实现）。</summary>
+        private void RestoreAndBringToFront()
+        {
+            RestoreTrayVisibility();
             NativeMethods.ShowWindow(Handle, SwRestore);
 
             // 未最小化但被遮挡时，用 TopMost 快速置顶再还原，确保冲破遮挡。
