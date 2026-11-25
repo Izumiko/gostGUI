@@ -193,6 +193,7 @@ namespace gostGUI
 
             // Task 13：DIP 窗口状态、DPI 布局/热切换与退出保存失败的可见性。
             Check("Form_WindowState_PersistsOnHide", FormWindowStatePersistsOnHide);
+            Check("Form_TrayRoundTrip_KeepsWindowHandle", FormTrayRoundTripKeepsWindowHandle);
             Check("Form_WindowState_RestoresFromConfig", FormWindowStateRestoresFromConfig);
             Check("Form_WindowState_CapturesMinimizedAndMaximized", FormWindowStateCapturesMinimizedAndMaximized);
             Check("Form_LayoutAt120And144Dpi_IsNotClipped", FormLayoutAt120And144DpiIsNotClipped);

@@ -325,6 +325,57 @@ namespace gostGUI
             }
         }
 
+        private static void FormTrayRoundTripKeepsWindowHandle()
+        {
+            string dir = CreateTempDirectory();
+            try
+            {
+                string path = Path.Combine(dir, "config.json");
+                Assert(Common.SaveTo(new ConfigData
+                {
+                    Items = new List<ConfigItem>
+                    {
+                        new ConfigItem { Name = "托盘用例", Program = "cmd.exe" }
+                    }
+                }, path), "写夹具应成功：" + Common.LastSaveError);
+
+                MethodInfo restore = typeof(FormMain).GetMethod(
+                    "RestoreAndBringToFront", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert(restore != null, "应能调用托盘恢复入口。");
+                var manager = new ConfigurationManager(path);
+                RunOnDedicatedSta(() =>
+                {
+                    using (var form = new FormMain(true, manager))
+                    {
+                        form.SuppressDialogsForTest = true;
+                        form.Show();
+                        Assert(form.Visible, "自检应从可见的窗体开始。");
+                        IntPtr handle = form.Handle;
+                        int destroyed = 0;
+                        form.HandleDestroyed += (_, __) => destroyed++;
+
+                        for (int i = 0; i < 2; i++)
+                        {
+                            form.Close();
+                            Assert(!form.IsDisposed && !form.Visible, "关闭应隐藏窗口，而不是退出。");
+                            Assert(destroyed == 0, "收进托盘时不应销毁窗口句柄。");
+                            Assert(form.IsHandleCreated, "窗口隐藏后仍应保留句柄。");
+                            AssertEqual(handle, form.Handle);
+
+                            restore.Invoke(form, null);
+                            Assert(form.Visible, "从托盘恢复后窗口应可见。");
+                            Assert(destroyed == 0, "从托盘恢复时不应销毁窗口句柄。");
+                            AssertEqual(handle, form.Handle);
+                        }
+                    }
+                });
+            }
+            finally
+            {
+                DeleteTempDirectory(dir);
+            }
+        }
+
         /// <summary>
         /// Task 13：启动时按 DIP 恢复窗口客户区与位置；96/120/144 三档都换算到正确的设备像素。
         /// 位置已不在任何屏幕上时回落居中 + 默认尺寸。

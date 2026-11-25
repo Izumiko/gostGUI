@@ -104,12 +104,24 @@
     <Compile Include="Theme\ThemeManager.cs" />
     <Compile Include="Theme\ThemeText.cs" />
     <Compile Include="Theme\WindowTheme.cs" />
-    <Compile Include="Theme\FlatButton.cs" />
-    <Compile Include="Theme\CardPanel.cs" />
-    <Compile Include="Theme\ToggleSwitch.cs" />
-    <Compile Include="Theme\ThemedTextBox.cs" />
-    <Compile Include="Theme\ThemedRichTextBox.cs" />
-    <Compile Include="Theme\ThemedListBox.cs" />
+    <Compile Include="Theme\FlatButton.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Theme\CardPanel.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Theme\ToggleSwitch.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Theme\ThemedTextBox.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Theme\ThemedRichTextBox.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Theme\ThemedListBox.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="Theme\ThemedMenuRenderer.cs" />
     <Compile Include="Theme\UiPreview.cs" />
     <Compile Include="Shared\*.cs" />
@@ -122,27 +134,35 @@
     </Compile>
     <Compile Include="Form\FormMain.Snapshots.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Form\FormMain.ConfigList.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Form\FormMain.DetailEditor.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Form\FormMain.LogPanel.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Form\FormMain.Tray.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Form\FormMain.Startup.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Form\FormMain.WindowState.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Form\FormMain.Theme.cs">
       <DependentUpon>FormMain.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="LogViewManager.cs" />
     <Compile Include="ConfigurationManager.cs" />

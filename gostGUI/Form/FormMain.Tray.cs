@@ -68,8 +68,6 @@ namespace gostGUI
                 Visible = true;
             }
 
-            ShowInTaskbar = true;
-
             if (WindowState == FormWindowState.Minimized)
             {
                 WindowState = FormWindowState.Normal;
@@ -107,7 +105,7 @@ namespace gostGUI
                 // 隐藏到托盘前记住窗口几何；应用还会继续跑，失败用气泡提示。
                 PersistWindowState(false);
                 e.Cancel = true;
-                ShowInTaskbar = false;
+                // Hide 已会移除任务栏按钮；切换 ShowInTaskbar 会重建窗口句柄，导致闪烁。
                 Hide();
                 return;
             }
